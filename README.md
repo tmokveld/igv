@@ -7,6 +7,18 @@
 
 Integrative Genomics Viewer - desktop genome visualization tool for Mac, Windows, and Linux.
 
+### Local patch: underscore-delimited coordinates
+
+The locus search box accepts `chromosome_start_end` and
+`chromosome_start_end_sequence`, where the optional sequence suffix contains
+letters and is ignored for navigation. For example, both `chr1_16682_16774`
+and `chr1_16682_16774_TGGTGGGGG` navigate to `chr1:16682-16774`.
+
+Coordinates follow the existing one-based, inclusive search convention; this
+is not a BED-coordinate conversion. Chromosome aliases and chromosome names
+containing underscores are supported. Exact feature and chromosome matches
+retain precedence, and existing short-interval expansion still applies.
+
 ### Building
 
 These instructions are meant for developers interested in working on the IGV code. For normal use,

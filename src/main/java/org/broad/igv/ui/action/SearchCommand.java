@@ -51,6 +51,8 @@ import java.net.URL;
 import java.util.List;
 import java.util.*;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * A class for performing search actions.  The class takes a view context and
@@ -76,6 +78,8 @@ public class SearchCommand implements Runnable {
     static String featureMutAA = "(\\S)+" + ":[A-Z,a-z,*]" + "(((\\d)+,?)+)" + "[A-Z,a-z,*]";
     static String featureMutNT = "(\\S)+" + ":" + "(\\S)+" + "[A,C,G,T,a,c,g,t]" + "\\>" + "[A,C,G,T,a,c,g,t]";
 
+    private static final Pattern UNDERSCORE_LOCUS =
+            Pattern.compile("(\\S+)_(\\d+)_(\\d+)(?:_[A-Za-z]+)?");
 
     public SearchCommand(ReferenceFrame referenceFrame, String searchString) {
         this(referenceFrame, searchString, GenomeManager.getInstance().getCurrentGenome());
@@ -449,6 +453,20 @@ public class SearchCommand implements Runnable {
             if (chromosome != null) {
                 //Found chromosome
                 startEnd = null;
+            }
+        }
+
+        // Preserve exact chromosome names before interpreting underscores as delimiters.
+        if (chromosome == null && searchString.indexOf('_') > 0) {
+            Matcher matcher = UNDERSCORE_LOCUS.matcher(searchString);
+            if (matcher.matches()) {
+                chromosome = genome.getChromosome(matcher.group(1));
+                if (chromosome != null) {
+                    startEnd = getStartEnd(matcher.group(2) + "-" + matcher.group(3));
+                    if (startEnd == null) {
+                        return null;
+                    }
+                }
             }
         }
 
