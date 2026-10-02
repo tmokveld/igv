@@ -839,9 +839,23 @@ public class AlignmentRenderer {
                     ByteSubarray blockBases = block.getBases();
                     final int s = (int) Math.max(Math.floor(bpStart), start);
                     final int e = (int) Math.min(Math.ceil(bpEnd), end);
+                    final boolean collapseSoftClips = isSoftClip && locScale > 1 && !bisulfiteMode;
                     for (int loc = s; loc < e; loc++) {
 
                         int idx = loc - start;
+                        if (collapseSoftClips) {
+                            // Many clipped bases can share a pixel when zoomed out. Paint only the
+                            // last drawable base in that column, rather than repeatedly compositing
+                            // the same pixel (which also overwhelms base-quality shading).
+                            int pixel = (int) ((loc - bpStart) / locScale);
+                            while (loc + 1 < e && (int) ((loc + 1.0 - bpStart) / locScale) == pixel) {
+                                loc++;
+                                int nextIdx = loc - start;
+                                if (showAllBases || blockBases.getByte(nextIdx) != '=') {
+                                    idx = nextIdx;
+                                }
+                            }
+                        }
 
                         boolean misMatch = AlignmentUtils.isMisMatch(reference, blockBases, isSoftClip, idx);
 
@@ -873,7 +887,7 @@ public class AlignmentRenderer {
                             }
 
                             if (renderOptions.getShadeBasesOption()) {
-                                byte qual = block.getQuality(loc - start);
+                                byte qual = block.getQuality(idx);
                                 color = BaseRenderer.getShadedColor(color, qual, renderOptions.getBaseQualityMin(), renderOptions.getBaseQualityMax());
                             }
 
