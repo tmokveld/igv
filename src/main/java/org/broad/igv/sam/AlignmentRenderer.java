@@ -840,6 +840,16 @@ public class AlignmentRenderer {
                     final int s = (int) Math.max(Math.floor(bpStart), start);
                     final int e = (int) Math.min(Math.ceil(bpEnd), end);
                     final boolean collapseSoftClips = isSoftClip && locScale > 1 && !bisulfiteMode;
+                    BaseRenderer.ColorStrip colorStrip = null;
+                    if (collapseSoftClips && s < e) {
+                        int firstPixel = Math.max(rowRect.x - 1, (int) ((s - bpStart) / locScale));
+                        int lastPixel = Math.min((int) rowRect.getMaxX(), (int) ((e - 1.0 - bpStart) / locScale));
+                        if (firstPixel > lastPixel) continue;
+                        Graphics2D stripGraphics = context.getGraphics2D("BASE_COLOR_STRIP");
+                        stripGraphics.setComposite(gAlignment.getComposite());
+                        colorStrip = context.getBaseColorStrip();
+                        colorStrip.reset(stripGraphics, firstPixel, lastPixel - firstPixel + 1);
+                    }
                     for (int loc = s; loc < e; loc++) {
 
                         int idx = loc - start;
@@ -899,9 +909,16 @@ public class AlignmentRenderer {
                                     // In "quick consensus" mode, only show mismatches at positions with a consistent alternative basepair.
                                     (!quickConsensus || alignmentCounts.isConsensusMismatch(loc, reference[idx], chr, snpThreshold));
                             if (showBase) {
-                                BaseRenderer.drawBase(gAlignment, color, c, pX, pY, dX, dY - (leaveMargin ? 2 : 0), bisulfiteMode, bisstatus);
+                                if (colorStrip != null) {
+                                    colorStrip.setColor(pX, color);
+                                } else {
+                                    BaseRenderer.drawBase(gAlignment, color, c, pX, pY, dX, dY - (leaveMargin ? 2 : 0), bisulfiteMode, bisstatus);
+                                }
                             }
                         }
+                    }
+                    if (colorStrip != null) {
+                        colorStrip.draw(pY, dY - (leaveMargin ? 2 : 0));
                     }
                 }
             }

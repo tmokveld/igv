@@ -30,6 +30,7 @@
 package org.broad.igv.track;
 
 import org.broad.igv.prefs.PreferencesManager;
+import org.broad.igv.sam.BaseRenderer;
 import org.broad.igv.sam.InsertionMarker;
 import org.broad.igv.ui.panel.ReferenceFrame;
 
@@ -51,6 +52,7 @@ public class RenderContext {
     private Map<Object, Graphics2D> graphicCache;
     private ReferenceFrame referenceFrame;
     private JComponent panel;
+    private BaseRenderer.ColorStrip baseColorStrip;
     public Rectangle visibleRect;
     public boolean multiframe = false;
     public int expandedInsertionPosition = -1;
@@ -86,6 +88,17 @@ public class RenderContext {
 
     public Graphics2D getGraphics() {
         return graphics;
+    }
+
+    /**
+     * Scratch for sequential base overlays in this paint only. Copied contexts
+     * get their own buffer; callers reset it before drawing each block.
+     */
+    public BaseRenderer.ColorStrip getBaseColorStrip() {
+        if (baseColorStrip == null) {
+            baseColorStrip = new BaseRenderer.ColorStrip();
+        }
+        return baseColorStrip;
     }
 
     public void clearGraphicsCache() {
@@ -155,6 +168,7 @@ public class RenderContext {
             g.dispose();
         }
         graphicCache.clear();
+        baseColorStrip = null;
     }
 
 }

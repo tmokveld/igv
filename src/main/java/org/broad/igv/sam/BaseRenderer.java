@@ -1,5 +1,6 @@
 package org.broad.igv.sam;
 
+import org.apache.batik.svggen.SVGGraphics2D;
 import org.broad.igv.renderer.GraphicUtils;
 import org.broad.igv.renderer.SequenceRenderer;
 import org.broad.igv.sam.mods.BaseModficationFilter;
@@ -11,6 +12,9 @@ import org.broad.igv.ui.color.ColorUtilities;
 
 import java.awt.*;
 import java.awt.geom.Rectangle2D;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -21,6 +25,96 @@ import java.util.Map;
  */
 
 public class BaseRenderer {
+
+    /**
+     * Reusable, single-paint-context scratch for one color per pixel column.
+     * The supplied graphics must be dedicated to the strip; its composite,
+     * transform and clip are used directly, without pre-compositing the colors.
+     */
+    public static final class ColorStrip {
+
+        private Graphics2D graphics;
+        private boolean vector;
+        private int startX;
+        private int width;
+        private int first;
+        private int last;
+        private BufferedImage image;
+        private int[] pixels;
+        private Color[] vectorColors;
+
+        public void reset(Graphics2D graphics, int startX, int width) {
+            this.graphics = graphics;
+            this.startX = startX;
+            this.width = width;
+            first = width;
+            last = -1;
+            vector = graphics instanceof SVGGraphics2D;
+
+            if (vector) {
+                if (vectorColors == null || vectorColors.length < width) {
+                    vectorColors = new Color[width];
+                } else {
+                    Arrays.fill(vectorColors, 0, width, null);
+                }
+            } else {
+                if (image == null || image.getWidth() < width) {
+                    image = new BufferedImage(width, 1, BufferedImage.TYPE_INT_ARGB);
+                    pixels = ((DataBufferInt) image.getRaster().getDataBuffer()).getData();
+                } else {
+                    Arrays.fill(pixels, 0, width, 0);
+                }
+                graphics.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                        RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+            }
+        }
+
+        public void setColor(int pixelX, Color color) {
+            int index = pixelX - startX;
+            if (index < 0 || index >= width) return;
+
+            if (vector) {
+                vectorColors[index] = color;
+            } else {
+                pixels[index] = color == null ? 0 : color.getRGB();
+            }
+            if (color != null && color.getAlpha() != 0) {
+                first = Math.min(first, index);
+                last = Math.max(last, index);
+            }
+        }
+
+        public void draw(int y, int height) {
+            if (height <= 0 || last < first) return;
+
+            if (vector) {
+                int index = first;
+                while (index <= last) {
+                    Color color = vectorColors[index];
+                    if (color == null || color.getAlpha() == 0) {
+                        index++;
+                        continue;
+                    }
+                    int rgba = color.getRGB();
+                    int end = index + 1;
+                    while (end <= last && vectorColors[end] != null &&
+                            vectorColors[end].getRGB() == rgba) {
+                        end++;
+                    }
+                    graphics.setColor(color);
+                    graphics.fillRect(startX + index, y, end - index, height);
+                    index = end;
+                }
+            } else {
+                // Transparent endpoints can result from overwriting a populated column.
+                while (first <= last && (pixels[first] >>> 24) == 0) first++;
+                while (last >= first && (pixels[last] >>> 24) == 0) last--;
+                if (last < first) return;
+                graphics.drawImage(image, startX + first, y, startX + last + 1, y + height,
+                        first, 0, last + 1, 1, null);
+            }
+        }
+    }
 
     /**
      * Draw the base using either a letter or character, using the given color,
