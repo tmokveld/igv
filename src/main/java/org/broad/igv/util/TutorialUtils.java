@@ -133,7 +133,7 @@ public class TutorialUtils {
                             }
                         }
                     }
-                    out.print(record.getSAMString());
+                    out.println(record.getSAMString());
                 }
                 iter.close();
             }
