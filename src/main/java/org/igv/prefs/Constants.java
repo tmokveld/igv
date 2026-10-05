@@ -223,7 +223,7 @@ final public class Constants {
     public static final String BASEMOD_B_COLOR = "BASEMOD.B_COLOR";
     public static final String BASEMOD_A_COLOR = "BASEMOD.A_COLOR";
     public static final String BASEMOD_O_COLOR = "BASEMOD.O_COLOR";
-    public static final String BASEMOD_17082_COLOR = "BASEMOD.17082_COLOR";
+    public static final String BASEMOD_17802_COLOR = "BASEMOD.17802_COLOR";
     public static final String BASEMOD_17596_COLOR = "BASEMOD.17596_COLOR";
     public static final String BASEMOD_21839_COLOR = "BASEMOD.21839_COLOR";
     public static final String BASEMOD_OTHER_COLOR = "BASEMOD.OTHER_COLOR";

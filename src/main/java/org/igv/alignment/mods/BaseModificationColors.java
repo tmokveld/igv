@@ -40,7 +40,7 @@ public class BaseModificationColors {
         colors.put("e", preferences.getAsColor(BASEMOD_E_COLOR));
         colors.put("b", preferences.getAsColor(BASEMOD_B_COLOR));
         colors.put("a", preferences.getAsColor(BASEMOD_A_COLOR));
-        colors.put("17082", preferences.getAsColor(BASEMOD_17082_COLOR));
+        colors.put("17802", preferences.getAsColor(BASEMOD_17802_COLOR));
         colors.put("17596", preferences.getAsColor(BASEMOD_17596_COLOR));
         colors.put("21839", preferences.getAsColor(BASEMOD_21839_COLOR));
 
