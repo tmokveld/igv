@@ -51,6 +51,7 @@ import org.broad.igv.ui.panel.IGVPopupMenu;
 import org.broad.igv.ui.panel.ReferenceFrame;
 import org.broad.igv.ui.util.MessageUtils;
 import org.broad.igv.ui.util.UIUtilities;
+import org.broad.igv.ultima.render.FlowIndelRendering;
 import org.broad.igv.util.ResourceLocator;
 import org.broad.igv.util.StringUtils;
 import org.broad.igv.util.blat.BlatClient;
@@ -210,6 +211,8 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
     private static final int DS_MARGIN_0 = 2;
     private static final int DOWNSAMPLED_ROW_HEIGHT = 3;
     private static final int INSERTION_ROW_HEIGHT = 9;
+    // Selection outlines, clipped-end strokes and supplementary labels can spill outside the row.
+    private static final int ROW_PAINT_PADDING = 6;
 
     public enum BisulfiteContext {
         CG("CG", new byte[]{}, new byte[]{'G'}),
@@ -648,6 +651,9 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
         }
 
         Rectangle visibleRect = context.getVisibleRect();
+        // The graphics clip is damage, not the viewport used to lay out squished rows.
+        Rectangle damageRect = context.getGraphics().getClipBounds();
+        boolean flowQualityBars = renderOptions.isIndelQualColoring();
 
         // Divide rectangle into equal height levels
         double y = inputRect.getY();
@@ -683,16 +689,15 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
             // Loop through the alignment rows for this group
             List<Row> rows = entry.getValue();
             for (Row row : rows) {
-                if ((visibleRect != null && y > visibleRect.getMaxY())) {
+                if (y > visibleRect.getMaxY()) {
                     break;
                 }
-
-                assert visibleRect != null;
-                if (y + h > visibleRect.getY()) {
+                row.y = y;
+                row.h = h;
+                if (y + h > visibleRect.getY() && (intersectsRowDamage(y, h, damageRect) ||
+                        (flowQualityBars && hasFlowAlignments(row.alignments)))) {
                     Rectangle rowRectangle = new Rectangle(inputRect.x, (int) y, inputRect.width, (int) h);
                     renderer.renderAlignments(row.alignments, alignmentCounts, context, rowRectangle, renderOptions);
-                    row.y = y;
-                    row.h = h;
                 }
                 y += h;
             }
@@ -725,6 +730,33 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
         groupBorderGraphics.drawLine(inputRect.x, bottom, inputRect.width, bottom);
     }
 
+    private static boolean intersectsRowDamage(double y, double h, Rectangle damageRect) {
+        return damageRect == null ||
+                ((int) y - ROW_PAINT_PADDING <= damageRect.getMaxY() &&
+                        (int) y + (int) h + ROW_PAINT_PADDING >= damageRect.getY());
+    }
+
+    private static boolean hasFlowAlignments(List<Alignment> alignments) {
+        for (int i = 0; i < alignments.size(); i++) {
+            if (hasFlowAlignment(alignments.get(i))) return true;
+        }
+        return false;
+    }
+
+    private static boolean hasFlowAlignment(Alignment alignment) {
+        // Flow quality bars can extend beyond the row padding. The preference is
+        // also enabled for ordinary reads, so exempt only rows that can paint them.
+        if (alignment instanceof SAMAlignment sam) {
+            return FlowIndelRendering.isFlow(sam.getRecord());
+        } else if (alignment instanceof PairedAlignment pair) {
+            return hasFlowAlignment(pair.firstAlignment) ||
+                    (pair.secondAlignment != null && hasFlowAlignment(pair.secondAlignment));
+        } else if (alignment instanceof LinkedAlignment linked) {
+            return hasFlowAlignments(linked.alignments);
+        }
+        return false;
+    }
+
     /**
      * Render insertions at position of marker in expanded form, showing sequence.  Much of this method is just
      * a repeat of the loop for alignment rendering to compute the Y position of affected alignments.
@@ -746,6 +778,7 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
         }
 
         Rectangle visibleRect = context.getVisibleRect();
+        Rectangle damageRect = context.getGraphics().getClipBounds();
 
         // Divide rectangle into equal height levels
         double y = inputRect.getY() - 3;
@@ -769,17 +802,15 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
             // Loop through the alignment rows for this group
             List<Row> rows = entry.getValue();
             for (Row row : rows) {
-                if ((visibleRect != null && y > visibleRect.getMaxY())) {
+                if (y > visibleRect.getMaxY()) {
                     return;
                 }
-
-                assert visibleRect != null;
-                if (y + h > visibleRect.getY()) {
+                row.y = y;
+                row.h = h;
+                if (y + h > visibleRect.getY() && intersectsRowDamage(y, h, damageRect)) {
                     Rectangle rowRectangle = new Rectangle(inputRect.x, (int) y, inputRect.width, (int) h);
                     if (row.alignments != null)  // TODO -- not sure this is needed
                         BaseRenderer.drawExpandedInsertions(insertionMarker, row.alignments, context, rowRectangle, leaveMargin, renderOptions);
-                    row.y = y;
-                    row.h = h;
                 }
                 y += h;
             }

@@ -730,9 +730,6 @@ public class AlignmentRenderer {
             if (h == 1) {
                 gAlignment.drawLine(blockPxStart, y, blockPxEnd, y);
             } else {
-                Shape blockShape;
-
-
                 if (!overlapped) {
                     int pixelGap = (int) (AlignmentPacker.MIN_ALIGNMENT_SPACING / locScale);
                     if (pixelGap < arrowPxWidth) {
@@ -744,16 +741,11 @@ public class AlignmentRenderer {
                 blockPxStart = Math.max(0, blockPxStart);
                 blockPxEnd = Math.min(rowRect.x + rowRect.width, blockPxEnd);
 
-                // Draw block as a rectangle; use a pointed hexagon in terminal block to indicate strand.
-                int[] xPoly = {
-                        blockPxStart - (leftmost && alignment.isNegativeStrand() && drawArrow ? arrowPxWidth : 0),
-                        blockPxStart,
-                        blockPxEnd,
-                        blockPxEnd + (rightmost && !alignment.isNegativeStrand() && drawArrow ? arrowPxWidth : 0),
-                        blockPxEnd,
-                        blockPxStart},
-                        yPoly = {y + h / 2, y, y, y + h / 2, y + h, y + h};
-                blockShape = new Polygon(xPoly, yPoly, xPoly.length);
+                boolean drawLeftClip = leftmost && leftClipped;
+                boolean drawRightClip = rightmost && rightClipped;
+                boolean textured = renderOptions.getDuplicatesOption() == AlignmentTrack.DuplicatesOption.TEXTURE && alignment.isDuplicate();
+                int leftArrowWidth = leftmost && alignment.isNegativeStrand() && drawArrow ? arrowPxWidth : 0;
+                int rightArrowWidth = rightmost && !alignment.isNegativeStrand() && drawArrow ? arrowPxWidth : 0;
 
                 Graphics2D g = gAlignment;
                 if (!block.hasBases()) {
@@ -761,26 +753,37 @@ public class AlignmentRenderer {
                     else if (block.getCigarOperator() == 'X') g = context.getGraphics2D("MISMATCH");
                 }
 
-                if (renderOptions.getDuplicatesOption() == AlignmentTrack.DuplicatesOption.TEXTURE && alignment.isDuplicate()) {
-                    final Graphics2D tg = (Graphics2D) g.create();
-
-                    final TexturePaint tp = getDuplicateTexture(tg.getColor());
-                    // Add the texture paint to the graphics context.
-                    tg.setPaint(tp);
-                    tg.fill(blockShape);
-                    tg.dispose();
+                // A terminal block can still be rectangular: its strand's tip may be
+                // clipped, on another block, or rounded down to zero pixels.
+                if (leftArrowWidth == 0 && rightArrowWidth == 0 && outlineGraphics == null &&
+                        !textured && !drawLeftClip && !drawRightClip && blockPxEnd >= blockPxStart) {
+                    g.fillRect(blockPxStart, y, blockPxEnd - blockPxStart, h);
                 } else {
-                    g.fill(blockShape);
+                    // Keep the original geometry for arrows, outlines, textures and clipping decorations.
+                    int[] xPoly = {blockPxStart - leftArrowWidth, blockPxStart, blockPxEnd,
+                            blockPxEnd + rightArrowWidth, blockPxEnd, blockPxStart};
+                    int[] yPoly = {y + h / 2, y, y, y + h / 2, y + h, y + h};
+                    Shape blockShape = new Polygon(xPoly, yPoly, xPoly.length);
+                    if (textured) {
+                        final Graphics2D tg = (Graphics2D) g.create();
+                        tg.setPaint(getDuplicateTexture(tg.getColor()));
+                        tg.fill(blockShape);
+                        tg.dispose();
+                    } else {
+                        g.fill(blockShape);
+                    }
+
+                    if (outlineGraphics != null) {
+                        outlineGraphics.draw(blockShape);
+                    }
+
+                    if (drawLeftClip || drawRightClip) {
+                        final SupplementaryAlignment.SupplementaryNeighbors supplementaryRenderingInfo =
+                                SupplementaryAlignment.getAdjacentSupplementaryReads(alignment);
+                        drawClippedEnds(clippedGraphics, xPoly, yPoly, drawLeftClip, drawRightClip, supplementaryRenderingInfo);
+                    }
                 }
 
-                if (outlineGraphics != null) {
-                    outlineGraphics.draw(blockShape);
-                }
-
-                final SupplementaryAlignment.SupplementaryNeighbors supplementaryRenderingInfo = SupplementaryAlignment.getAdjacentSupplementaryReads(alignment);
-                final boolean drawLeftClip = leftmost && leftClipped;
-                final boolean drawRightClip = rightmost && rightClipped;
-                drawClippedEnds(clippedGraphics, xPoly, yPoly, drawLeftClip, drawRightClip, supplementaryRenderingInfo);
             }
             leftmost = false;
         }
@@ -839,9 +842,11 @@ public class AlignmentRenderer {
                     ByteSubarray blockBases = block.getBases();
                     final int s = (int) Math.max(Math.floor(bpStart), start);
                     final int e = (int) Math.min(Math.ceil(bpEnd), end);
-                    final boolean collapseSoftClips = isSoftClip && locScale > 1 && !bisulfiteMode;
+                    final boolean batchSoftClips = isSoftClip && locScale > 1 && !bisulfiteMode &&
+                            gAlignment.getComposite() instanceof AlphaComposite composite &&
+                            composite.getRule() == AlphaComposite.SRC_OVER;
                     BaseRenderer.ColorStrip colorStrip = null;
-                    if (collapseSoftClips && s < e) {
+                    if (batchSoftClips && s < e) {
                         int firstPixel = Math.max(rowRect.x - 1, (int) ((s - bpStart) / locScale));
                         int lastPixel = Math.min((int) rowRect.getMaxX(), (int) ((e - 1.0 - bpStart) / locScale));
                         if (firstPixel > lastPixel) continue;
@@ -853,19 +858,6 @@ public class AlignmentRenderer {
                     for (int loc = s; loc < e; loc++) {
 
                         int idx = loc - start;
-                        if (collapseSoftClips) {
-                            // Many clipped bases can share a pixel when zoomed out. Paint only the
-                            // last drawable base in that column, rather than repeatedly compositing
-                            // the same pixel (which also overwhelms base-quality shading).
-                            int pixel = (int) ((loc - bpStart) / locScale);
-                            while (loc + 1 < e && (int) ((loc + 1.0 - bpStart) / locScale) == pixel) {
-                                loc++;
-                                int nextIdx = loc - start;
-                                if (showAllBases || blockBases.getByte(nextIdx) != '=') {
-                                    idx = nextIdx;
-                                }
-                            }
-                        }
 
                         boolean misMatch = AlignmentUtils.isMisMatch(reference, blockBases, isSoftClip, idx);
 
@@ -910,7 +902,7 @@ public class AlignmentRenderer {
                                     (!quickConsensus || alignmentCounts.isConsensusMismatch(loc, reference[idx], chr, snpThreshold));
                             if (showBase) {
                                 if (colorStrip != null) {
-                                    colorStrip.setColor(pX, color);
+                                    colorStrip.blendColor(pX, color);
                                 } else {
                                     BaseRenderer.drawBase(gAlignment, color, c, pX, pY, dX, dY - (leaveMargin ? 2 : 0), bisulfiteMode, bisstatus);
                                 }

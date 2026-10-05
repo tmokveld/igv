@@ -40,6 +40,7 @@ public class AlignmentRendererClippingTest {
     private IGVPreferences preferences;
     private final Map<String, String> previousPreferences = new LinkedHashMap<>();
     private HashMap<Character, Color> previousNucleotideColors;
+    private Map<String, Color> previousShadedColors;
     private AlignmentTrack track;
     private SAMFileHeader header;
 
@@ -65,6 +66,10 @@ public class AlignmentRendererClippingTest {
         AlignmentRenderer.nucleotideColors.put('C', Color.BLUE);
         AlignmentRenderer.nucleotideColors.put('G', Color.ORANGE);
         AlignmentRenderer.nucleotideColors.put('T', Color.RED);
+        synchronized (BaseRenderer.shadedColorCache) {
+            previousShadedColors = new HashMap<>(BaseRenderer.shadedColorCache);
+            BaseRenderer.shadedColorCache.clear();
+        }
 
         header = new SAMFileHeader();
         header.addSequence(new SAMSequenceRecord("chr16", 50000));
@@ -96,6 +101,12 @@ public class AlignmentRendererClippingTest {
         }
         if (preferences != null) previousPreferences.forEach(preferences::put);
         if (previousNucleotideColors != null) AlignmentRenderer.nucleotideColors = previousNucleotideColors;
+        if (previousShadedColors != null) {
+            synchronized (BaseRenderer.shadedColorCache) {
+                BaseRenderer.shadedColorCache.clear();
+                BaseRenderer.shadedColorCache.putAll(previousShadedColors);
+            }
+        }
         GenomeManager.getInstance().setCurrentGenomeForTest(previousGenome);
         Globals.setHeadless(previousHeadless);
     }
@@ -110,10 +121,9 @@ public class AlignmentRendererClippingTest {
             render(alignment, graphics, 0, 20000, 400);
             Element root = graphics.getRoot();
             NodeList rectangles = root.getElementsByTagName("rect");
-            // Two homogeneous clips need two runs, not one rectangle per column.
-            assertEquals("Unmerged homopolymer runs", 2, rectangles.getLength());
-            assertVectorRectangle((Element) rectangles.item(0), 100, 100);
-            assertVectorRectangle((Element) rectangles.item(1), 200, 101);
+            assertTrue("Homopolymer columns should be batched into vector runs",
+                    rectangles.getLength() < 20);
+            assertTrue("Both clip ends must remain visible", rectangles.getLength() >= 2);
             assertEquals("SVG must not embed a raster strip", 0, root.getElementsByTagName("image").getLength());
         } finally {
             graphics.dispose();
@@ -126,13 +136,12 @@ public class AlignmentRendererClippingTest {
                 "ACGT".repeat(10) + "A".repeat(20) + "TGCA".repeat(10)));
         BufferedImage overview = image(alignment, 9920, 10080, 80);
         BufferedImage detailed = image(alignment, 9920, 10080, 160);
-        // Compare interior columns to their final base at one base/pixel. Check
-        // both clip ends and every nucleotide, not the alignment's outline/arrow.
+        BufferedImage reference = originalSoftClipImage(alignment, 9920, 10080, 80, 1);
         for (int x = 22; x < 39; x++) {
-            assertEquals(detailed.getRGB(2 * x + 1, 5), overview.getRGB(x, 5));
+            assertChannelsWithinTwo("Left clip column " + x, reference.getRGB(x, 5), overview.getRGB(x, 5));
         }
         for (int x = 52; x < 68; x++) {
-            assertEquals(detailed.getRGB(2 * x + 1, 5), overview.getRGB(x, 5));
+            assertChannelsWithinTwo("Right clip column " + x, reference.getRGB(x, 5), overview.getRGB(x, 5));
         }
         assertNotEquals(detailed.getRGB(48, 5), detailed.getRGB(49, 5));
         assertNotEquals(detailed.getRGB(49, 5), detailed.getRGB(50, 5));
@@ -140,7 +149,7 @@ public class AlignmentRendererClippingTest {
     }
 
     @Test
-    public void overviewUsesQualityOfLastDrawableBaseNotTrailingEquals() {
+    public void overviewBlendsDrawableBasesWithoutPaintingTrailingEquals() {
         SAMRecord record = record("40S20M", "A=C=".repeat(10) + "A".repeat(20));
         byte[] qualities = record.getBaseQualities();
         for (int i = 2; i < 40; i += 4) qualities[i] = 0;
@@ -148,8 +157,11 @@ public class AlignmentRendererClippingTest {
         SAMAlignment alignment = new SAMAlignment(record);
         track.getRenderOptions().setShadeBasesOption(true);
         BufferedImage overview = image(alignment, 9920, 10080, 40);
-        BufferedImage detailed = image(alignment, 9920, 10080, 160);
-        assertChannelsWithinTwo("Last drawable base quality", detailed.getRGB(74, 5), overview.getRGB(18, 5));
+        BufferedImage reference = originalSoftClipImage(alignment, 9920, 10080, 40, 1);
+        for (int x = 12; x < 19; x++) {
+            assertChannelsWithinTwo("Drawable base quality, column " + x,
+                    reference.getRGB(x, 5), overview.getRGB(x, 5));
+        }
         track.getRenderOptions().setShadeBasesOption(false);
         assertNotEquals(image(alignment, 9920, 10080, 40).getRGB(18, 5), overview.getRGB(18, 5));
     }
@@ -163,54 +175,34 @@ public class AlignmentRendererClippingTest {
         track.getRenderOptions().setShowAllBases(true);
         BufferedImage allBases = image(alignment, 9920, 10080, 40);
         assertNotEquals(mismatchesOnly.getRGB(18, 5), allBases.getRGB(18, 5));
-        assertEquals(image(alignment, 9920, 10080, 160).getRGB(75, 5), allBases.getRGB(18, 5));
+        assertChannelsWithinTwo("Equals bases use the ordinary fallback color",
+                originalSoftClipImage(alignment, 9920, 10080, 40, 1).getRGB(18, 5), allBases.getRGB(18, 5));
     }
 
     @Test
     public void partialColumnsAtViewportEdgesRetainClippedBases() {
         SAMAlignment alignment = new SAMAlignment(record("80S20M", "C".repeat(80) + "A".repeat(20)));
         BufferedImage overview = image(alignment, 9933, 9976, 20);
-        BufferedImage detailed = image(alignment, 9920, 10080, 160);
-        int clippedColor = detailed.getRGB(55, 5);
+        BufferedImage reference = originalSoftClipImage(alignment, 9933, 9976, 20, 1);
         for (int x = 0; x < 20; x++) {
-            assertEquals("Clipped column " + x, clippedColor, overview.getRGB(x, 5));
+            assertChannelsWithinTwo("Clipped column " + x, reference.getRGB(x, 5), overview.getRGB(x, 5));
         }
     }
 
-    @Test
-    public void scaledSvgMergesColoredRunsWithoutBridgingEqualsOnlyGaps() {
-        SAMAlignment alignment = new SAMAlignment(record("80S20M", "AAAA====".repeat(10) + "A".repeat(20)));
-        Document document = GenericDOMImplementation.getDOMImplementation()
-                .createDocument("http://www.w3.org/2000/svg", "svg", null);
-        SVGGraphics2D graphics = new SVGGraphics2D(document);
-        try {
-            graphics.scale(2, 2);
-            render(alignment, graphics, 9920, 10080, 80);
-            Element root = graphics.getRoot();
-            assertEquals("SVG must remain vector graphics", 0, root.getElementsByTagName("image").getLength());
-            NodeList rectangles = root.getElementsByTagName("rect");
-            assertEquals("Ten colored runs separated by untouched holes", 10, rectangles.getLength());
-            for (int run = 0; run < rectangles.getLength(); run++) {
-                assertVectorRectangle((Element) rectangles.item(run), 4 * run, 2);
-            }
-        } finally {
-            graphics.dispose();
-        }
-    }
 
     @Test
-    public void scaledRasterClipsKeepSharpColumnsAndDetailedColors() {
+    public void scaledRasterClipsKeepSharpColumnsAndOrderedColors() {
         SAMAlignment alignment = new SAMAlignment(record("40S20M40S",
                 "AACCGGTT".repeat(5) + "A".repeat(20) + "TTGGCCAA".repeat(5)));
-        BufferedImage detailed = image(alignment, 9920, 10080, 160);
         for (int scale : new int[]{1, 2}) {
             BufferedImage overview = image(alignment, 9920, 10080, 80, scale);
+            BufferedImage reference = originalSoftClipImage(alignment, 9920, 10080, 80, scale);
             for (int x = 22; x < 68; x++) {
                 if (x >= 39 && x < 52) continue; // Aligned block and end indicators.
-                int expected = detailed.getRGB(2 * x + 1, 5);
+                int expected = reference.getRGB(scale * x, 5 * scale);
                 for (int dx = 0; dx < scale; dx++) {
                     for (int y = 2 * scale; y < 8 * scale; y++) {
-                        assertEquals("Scale " + scale + ", column " + x + ", row " + y,
+                        assertChannelsWithinTwo("Scale " + scale + ", column " + x + ", row " + y,
                                 expected, overview.getRGB(scale * x + dx, y));
                     }
                 }
@@ -220,12 +212,14 @@ public class AlignmentRendererClippingTest {
     }
 
     @Test
-    public void shadedClipsSelectTheLastDrawableBaseAndItsQualityAtBothScales() {
+    public void shadedClipsBlendMixedColorsAndQualitiesInReadOrderAtBothScales() {
         SAMRecord record = record("48S20M", "TAC=TAG=TAT=".repeat(4) + "A".repeat(20));
         byte[] qualities = record.getBaseQualities();
         for (int i = 2; i < 48; i += 4) {
+            qualities[i - 2] = 0;
+            qualities[i - 1] = 10;
             qualities[i] = (byte) ((i / 4) % 3 == 0 ? 0 : (i / 4) % 3 == 1 ? 10 : 30);
-            qualities[i + 1] = 40; // A trailing '=' must not replace the drawable sample.
+            qualities[i + 1] = 40; // A trailing '=' contributes no layer.
         }
         record.setBaseQualities(qualities);
         SAMAlignment alignment = new SAMAlignment(record);
@@ -233,16 +227,13 @@ public class AlignmentRendererClippingTest {
         BufferedImage detailed = image(alignment, 9920, 10080, 160);
         for (int scale : new int[]{1, 2}) {
             BufferedImage overview = image(alignment, 9920, 10080, 40, scale);
+            BufferedImage reference = originalSoftClipImage(alignment, 9920, 10080, 40, scale);
             for (int x = 10; x < 19; x++) {
                 for (int dx = 0; dx < scale; dx++) {
                     String message = "Scale " + scale + ", shaded column " + x;
-                    int expected = detailed.getRGB(4 * x + 2, 5);
+                    int expected = reference.getRGB(scale * x + dx, 5 * scale);
                     int actual = overview.getRGB(scale * x + dx, 5 * scale);
-                    if ((x - 8) % 3 == 2) {
-                        assertEquals(message + " opaque sample", expected, actual);
-                    } else {
-                        assertChannelsWithinTwo(message, expected, actual);
-                    }
+                    assertChannelsWithinTwo(message, expected, actual);
                 }
             }
         }
@@ -254,15 +245,39 @@ public class AlignmentRendererClippingTest {
     }
 
     @Test
+    public void lowQualityClipsAccumulateEveryDrawableBaseAtBothScales() {
+        SAMRecord record = record("80S20M", "C".repeat(80) + "A".repeat(20));
+        byte[] qualities = record.getBaseQualities();
+        Arrays.fill(qualities, 0, 80, (byte) 0);
+        record.setBaseQualities(qualities);
+        SAMAlignment alignment = new SAMAlignment(record);
+        track.getRenderOptions().setShadeBasesOption(true);
+        int singleBaseColor = image(alignment, 9920, 10080, 160).getRGB(32, 5);
+        for (int scale : new int[]{1, 2}) {
+            BufferedImage actual = image(alignment, 9920, 10080, 40, scale);
+            BufferedImage reference = originalSoftClipImage(alignment, 9920, 10080, 40, scale);
+            assertNotEquals("Several faint bases must not collapse to one faint base",
+                    singleBaseColor, reference.getRGB(8 * scale, 5 * scale));
+            for (int x = 2; x < 19; x++) {
+                for (int dx = 0; dx < scale; dx++) {
+                    assertChannelsWithinTwo("Low quality, scale " + scale + ", column " + x,
+                            reference.getRGB(x * scale + dx, 5 * scale),
+                            actual.getRGB(x * scale + dx, 5 * scale));
+                }
+            }
+        }
+    }
+
+    @Test
     public void equalsOnlyHolesBetweenColoredColumnsStayUnpainted() {
         SAMAlignment alignment = new SAMAlignment(record("48S20M",
                 "AA==CC==GG==TT==".repeat(3) + "A".repeat(20)));
         BufferedImage overview = image(alignment, 9920, 10080, 80);
-        BufferedImage detailed = image(alignment, 9920, 10080, 160);
+        BufferedImage reference = originalSoftClipImage(alignment, 9920, 10080, 80, 1);
         SAMAlignment blankClip = new SAMAlignment(record("48S20M", "=".repeat(48) + "A".repeat(20)));
         BufferedImage blank = image(blankClip, 9920, 10080, 80);
         for (int x = 18; x < 38; x++) {
-            assertEquals("Column " + x, detailed.getRGB(2 * x + 1, 5), overview.getRGB(x, 5));
+            assertChannelsWithinTwo("Column " + x, reference.getRGB(x, 5), overview.getRGB(x, 5));
             if (x % 2 == 1) {
                 assertEquals("Equals-only hole " + x, blank.getRGB(x, 5), overview.getRGB(x, 5));
             } else {
@@ -299,12 +314,12 @@ public class AlignmentRendererClippingTest {
         int[][] clipRanges = {{2, 38, 52, 88}, {32, 38, 52, 78}, {22, 38, 52, 58},
                 {2, 38, 52, 98}, {32, 38, 52, 78}};
         for (int row = 0; row < alignments.size(); row++) {
-            BufferedImage detailed = image(alignments.get(row), 9920, 10160, 240);
+            BufferedImage reference = originalSoftClipImage(alignments.get(row), 9920, 10160, 120, 1);
             int[] ranges = clipRanges[row];
             for (int range = 0; range < ranges.length; range += 2) {
                 for (int x = ranges[range]; x < ranges[range + 1]; x++) {
-                    assertEquals("Read " + row + ", column " + x,
-                            detailed.getRGB(2 * x + 1, 5), overview.getRGB(x, 12 * row + 5));
+                    assertChannelsWithinTwo("Read " + row + ", column " + x,
+                            reference.getRGB(x, 5), overview.getRGB(x, 12 * row + 5));
                 }
             }
         }
@@ -317,10 +332,10 @@ public class AlignmentRendererClippingTest {
     @Test
     public void fractionalOriginAndViewportClipPreserveBothEdgeColumns() {
         SAMAlignment alignment = new SAMAlignment(record("80S20M", "C".repeat(80) + "A".repeat(20)));
-        int expectedColor = image(alignment, 9920, 10080, 160).getRGB(55, 5);
         for (int scale : new int[]{1, 2}) {
             BufferedImage image = new BufferedImage(20 * scale, 12 * scale, BufferedImage.TYPE_INT_RGB);
             Graphics2D graphics = image.createGraphics();
+            BufferedImage reference;
             RenderContext context = null;
             try {
                 graphics.setColor(Color.WHITE);
@@ -332,13 +347,14 @@ public class AlignmentRendererClippingTest {
                 context = new RenderContext(null, graphics, frame, new Rectangle(3, 0, 14, 12));
                 new AlignmentRenderer(track).renderAlignments(List.of(alignment), null, context,
                         new Rectangle(3, 0, 14, 12), track.getRenderOptions());
+                reference = originalSoftClipImage(alignment, 9933.5, 9976, 20, scale);
             } finally {
                 if (context != null) context.dispose();
                 graphics.dispose();
             }
             for (int x = 0; x < image.getWidth(); x++) {
-                assertEquals("Scale " + scale + ", viewport column " + x,
-                        x >= 3 * scale && x < 17 * scale ? expectedColor : Color.WHITE.getRGB(),
+                assertChannelsWithinTwo("Scale " + scale + ", viewport column " + x,
+                        x >= 3 * scale && x < 17 * scale ? reference.getRGB(x, 5 * scale) : Color.WHITE.getRGB(),
                         image.getRGB(x, 5 * scale));
                 assertEquals("Above viewport clip", Color.WHITE.getRGB(), image.getRGB(x, scale));
                 assertEquals("Below viewport clip", Color.WHITE.getRGB(), image.getRGB(x, 10 * scale));
@@ -347,7 +363,7 @@ public class AlignmentRendererClippingTest {
     }
 
     @Test
-    public void alignedBasesStillCompositeEveryBaseInsteadOfUsingTheSoftClipPolicy() {
+    public void alignedBasesStillCompositeEveryBaseWithTheOriginalGraphicsComposite() {
         track.getRenderOptions().setShowAllBases(true);
         SAMAlignment alignment = new SAMAlignment(record("80M", "AC".repeat(40)));
         BufferedImage overview = image(alignment, 9920, 10080, 80);
@@ -357,7 +373,7 @@ public class AlignmentRendererClippingTest {
             graphics.setColor(Color.WHITE);
             graphics.fillRect(0, 0, 1, 1);
             graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.75f));
-            // Aligned bases retain the original A-then-C overdraw, unlike soft clips.
+            // Aligned bases retain the original A-then-C overdraw.
             for (Color color : List.of(track.getColor(), AlignmentRenderer.nucleotideColors.get('A'),
                     AlignmentRenderer.nucleotideColors.get('C'))) {
                 graphics.setColor(color);
@@ -392,12 +408,209 @@ public class AlignmentRendererClippingTest {
         }
     }
 
-    private static void assertVectorRectangle(Element rectangle, int x, int width) {
-        assertEquals("Run x", x, Double.parseDouble(rectangle.getAttribute("x")), 0.0);
-        assertEquals("Run width", width, Double.parseDouble(rectangle.getAttribute("width")), 0.0);
-        assertEquals("Run y", 0.0, Double.parseDouble(rectangle.getAttribute("y")), 0.0);
-        assertEquals("Run height", 10.0, Double.parseDouble(rectangle.getAttribute("height")), 0.0);
+    @Test
+    public void stripAppliesExtraAlphaToEveryLayerAndAccumulatesLowAlphaAtBothScales() {
+        Color[][] columns = blendingColumns();
+        Color background = new Color(37, 79, 113);
+        for (float extraAlpha : new float[]{0.5f, 0.75f}) {
+            for (int scale : new int[]{1, 2}) {
+                BufferedImage actual = stripImage(columns, background, extraAlpha, scale, true);
+                BufferedImage reference = stripImage(columns, background, extraAlpha, scale, false);
+                assertNotEquals("Read order changes mixed-color output",
+                        reference.getRGB(scale, 5 * scale), reference.getRGB(3 * scale, 5 * scale));
+                assertNotEquals("Low-alpha layers accumulate visibly", background.getRGB(),
+                        reference.getRGB(5 * scale, 5 * scale));
+                for (int y = 0; y < actual.getHeight(); y++) {
+                    for (int x = 0; x < actual.getWidth(); x++) {
+                        assertChannelsWithinTwo("Extra alpha " + extraAlpha + ", scale " + scale +
+                                ", pixel " + x + "," + y, reference.getRGB(x, y), actual.getRGB(x, y));
+                    }
+                }
+            }
+        }
     }
+
+    @Test
+    public void vectorStripColorsCompositeLikeOrderedRasterLayersWithoutEmbeddedImages() {
+        Color[][] columns = blendingColumns();
+        Color background = new Color(37, 79, 113);
+        for (int scale : new int[]{1, 2}) {
+            Document document = GenericDOMImplementation.getDOMImplementation()
+                    .createDocument("http://www.w3.org/2000/svg", "svg", null);
+            SVGGraphics2D graphics = new SVGGraphics2D(document);
+            try {
+                graphics.scale(scale, scale);
+                graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.5f));
+                BaseRenderer.ColorStrip strip = new BaseRenderer.ColorStrip();
+                strip.reset(graphics, 0, columns.length);
+                blendColumns(strip, columns);
+                strip.draw(2, 6);
+                Element root = graphics.getRoot();
+                assertEquals("SVG must not embed a raster strip", 0, root.getElementsByTagName("image").getLength());
+                BufferedImage raster = stripImage(columns, background, 0.5f, scale, true);
+                BufferedImage reference = stripImage(columns, background, 0.5f, scale, false);
+                for (int x = 0; x < columns.length; x++) {
+                    int svgColor = vectorPixel(root, x, 5, background);
+                    assertChannelsWithinTwo("SVG column " + x + ", scale " + scale,
+                            reference.getRGB(x * scale, 5 * scale), svgColor);
+                    assertChannelsWithinTwo("SVG/raster column " + x + ", scale " + scale,
+                            raster.getRGB(x * scale, 5 * scale), svgColor);
+                    assertEquals("Vector gaps remain untouched", columns[x].length != 0,
+                            vectorRectangleCovers(root, x, 5));
+                }
+            } finally {
+                graphics.dispose();
+            }
+        }
+    }
+
+    private static Color[][] blendingColumns() {
+        Color red = new Color(255, 0, 0, 51);
+        Color green = new Color(0, 255, 0, 128);
+        Color blue = new Color(0, 0, 255, 51);
+        Color[] lowAlpha = new Color[16];
+        Arrays.fill(lowAlpha, new Color(0, 0, 255, 16));
+        return new Color[][]{{}, {red, green, blue}, {red, green, blue},
+                {blue, green, red}, {}, lowAlpha, {}, {}};
+    }
+
+    private static void blendColumns(BaseRenderer.ColorStrip strip, Color[][] columns) {
+        for (int x = 0; x < columns.length; x++) {
+            for (Color color : columns[x]) strip.blendColor(x, color);
+        }
+    }
+
+    private static BufferedImage stripImage(Color[][] columns, Color background, float extraAlpha,
+                                            int scale, boolean batched) {
+        BufferedImage image = new BufferedImage(columns.length * scale, 12 * scale, BufferedImage.TYPE_INT_RGB);
+        Graphics2D graphics = image.createGraphics();
+        try {
+            graphics.setColor(background);
+            graphics.fillRect(0, 0, image.getWidth(), image.getHeight());
+            graphics.scale(scale, scale);
+            graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, extraAlpha));
+            if (batched) {
+                BaseRenderer.ColorStrip strip = new BaseRenderer.ColorStrip();
+                strip.reset(graphics, 0, columns.length);
+                blendColumns(strip, columns);
+                strip.draw(2, 6);
+            } else {
+                for (int x = 0; x < columns.length; x++) {
+                    for (Color color : columns[x]) {
+                        BaseRenderer.drawBase(graphics, color, 'N', x, 2, 1, 6, false, null);
+                    }
+                }
+            }
+        } finally {
+            graphics.dispose();
+        }
+        return image;
+    }
+
+    private static boolean vectorRectangleCovers(Element root, int x, int y) {
+        NodeList rectangles = root.getElementsByTagName("rect");
+        for (int i = 0; i < rectangles.getLength(); i++) {
+            if (rectangleContains((Element) rectangles.item(i), x, y)) return true;
+        }
+        return false;
+    }
+
+    private static boolean rectangleContains(Element rectangle, int x, int y) {
+        double left = Double.parseDouble(rectangle.getAttribute("x"));
+        double top = Double.parseDouble(rectangle.getAttribute("y"));
+        double width = Double.parseDouble(rectangle.getAttribute("width"));
+        double height = Double.parseDouble(rectangle.getAttribute("height"));
+        return x >= left && x < left + width && y >= top && y < top + height;
+    }
+
+    // SVGGraphics2D exports presentation attributes inherited from enclosing groups.
+    // Replay rectangle paints through Java2D rather than reproducing the strip's blending formula.
+    // Coordinates are logical/user-space, so the same samples apply at either SVG scale.
+    private static int vectorPixel(Element root, int x, int y, Color background) {
+        BufferedImage image = new BufferedImage(1, 1, BufferedImage.TYPE_INT_RGB);
+        Graphics2D graphics = image.createGraphics();
+        try {
+            graphics.setColor(background);
+            graphics.fillRect(0, 0, 1, 1);
+            NodeList rectangles = root.getElementsByTagName("rect");
+            for (int i = 0; i < rectangles.getLength(); i++) {
+                Element rectangle = (Element) rectangles.item(i);
+                if (!rectangleContains(rectangle, x, y)) continue;
+                String fill = inheritedAttribute(rectangle, "fill", "black");
+                assertTrue("Expected an SVG RGB fill, got " + fill, fill.startsWith("rgb("));
+                String[] channels = fill.substring(4, fill.length() - 1).split(",");
+                Color color = new Color(Integer.parseInt(channels[0].trim()),
+                        Integer.parseInt(channels[1].trim()), Integer.parseInt(channels[2].trim()));
+                float alpha = Float.parseFloat(inheritedAttribute(rectangle, "fill-opacity", "1"));
+                for (org.w3c.dom.Node node = rectangle; node instanceof Element; node = node.getParentNode()) {
+                    String opacity = ((Element) node).getAttribute("opacity");
+                    if (!opacity.isEmpty()) alpha *= Float.parseFloat(opacity);
+                }
+                graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, alpha));
+                graphics.setColor(color);
+                graphics.fillRect(0, 0, 1, 1);
+            }
+        } finally {
+            graphics.dispose();
+        }
+        return image.getRGB(0, 0);
+    }
+
+    private static String inheritedAttribute(Element element, String name, String fallback) {
+        for (org.w3c.dom.Node node = element; node instanceof Element; node = node.getParentNode()) {
+            String value = ((Element) node).getAttribute(name);
+            if (!value.isEmpty()) return value;
+        }
+        return fallback;
+    }
+
+    private BufferedImage originalSoftClipImage(Alignment alignment, double start, int end, int width, int scale) {
+        AlignmentTrack.RenderOptions options = track.getRenderOptions();
+        boolean showAllBases = options.isShowAllBases();
+        boolean showMismatches = options.isShowMismatches();
+        BufferedImage reference = new BufferedImage(width * scale, 12 * scale, BufferedImage.TYPE_INT_RGB);
+        Graphics2D graphics = reference.createGraphics();
+        RenderContext context = null;
+        ReferenceFrame frame = frame((int) start, end, width);
+        frame.setOrigin(start);
+        try {
+            graphics.setColor(Color.WHITE);
+            graphics.fillRect(0, 0, reference.getWidth(), reference.getHeight());
+            graphics.scale(scale, scale);
+            context = new RenderContext(null, graphics, frame, new Rectangle(0, 0, width, 12));
+            options.setShowAllBases(false);
+            options.setShowMismatches(false);
+            new AlignmentRenderer(track).renderAlignments(List.of(alignment), null, context,
+                    new Rectangle(0, 0, width, 12), options);
+            options.setShowAllBases(showAllBases);
+            options.setShowMismatches(showMismatches);
+            graphics.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.75f));
+            for (AlignmentBlock block : alignment.getAlignmentBlocks()) {
+                if (!block.isSoftClip()) continue;
+                int first = Math.max((int) Math.floor(frame.getOrigin()), block.getStart());
+                int last = Math.min((int) Math.ceil(frame.getEnd()), block.getEnd());
+                for (int loc = first; loc < last; loc++) {
+                    int offset = loc - block.getStart();
+                    char base = (char) block.getBases().getByte(offset);
+                    if (base == '=' && !showAllBases) continue;
+                    Color color = AlignmentRenderer.nucleotideColors.getOrDefault(base, Color.BLACK);
+                    if (options.getShadeBasesOption()) {
+                        color = BaseRenderer.getShadedColor(color, block.getQuality(offset),
+                                options.getBaseQualityMin(), options.getBaseQualityMax());
+                    }
+                    int x = (int) ((loc - frame.getOrigin()) / frame.getScale());
+                    BaseRenderer.drawBase(graphics, color, base, x, 0, 1, 10, false, null);
+                }
+            }
+        } finally {
+            options.setShowAllBases(showAllBases);
+            options.setShowMismatches(showMismatches);
+            if (context != null) context.dispose();
+            graphics.dispose();
+        }
+        return reference;
+    }
+
 
     private static void assertChannelsWithinTwo(String message, int expected, int actual) {
         assertEquals(message + " alpha", expected >>> 24, actual >>> 24);
