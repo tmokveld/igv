@@ -48,6 +48,7 @@ import org.broad.igv.ultima.render.FlowIndelRendering;
 import org.broad.igv.util.ChromosomeColors;
 
 import java.awt.*;
+import java.awt.geom.AffineTransform;
 import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
@@ -302,6 +303,10 @@ public class AlignmentRenderer {
 
         initializeGraphics(context);
 
+        final boolean leaveMargin = this.track.getDisplayMode() != Track.DisplayMode.SQUISHED;
+        ThinReadBody thinReadBody = Math.max(1, rowRect.height - (leaveMargin ? 2 : 0)) == 1
+                ? ThinReadBody.create(context, rowRect.y) : null;
+
         double origin = context.getOrigin();
         double locScale = context.getScale();
 
@@ -344,7 +349,6 @@ public class AlignmentRenderer {
                 // Does the change for Bisulfite kill some machines?
                 double pixelWidth = pixelEnd - pixelStart;
                 Color alignmentColor = getAlignmentColor(alignment, track);
-                final boolean leaveMargin = (this.track.getDisplayMode() != Track.DisplayMode.SQUISHED);
                 final ColorOption colorOption = renderOptions.getColorOption();
                 if ((pixelWidth < 2) &&
                         !((AlignmentTrack.isBisulfiteColorType(colorOption) ||
@@ -364,11 +368,11 @@ public class AlignmentRenderer {
                     g.fillRect((int) pixelStart, y, w, h);
                     lastPixelDrawn = (int) pixelStart + w;
                 } else if (alignment instanceof PairedAlignment) {
-                    drawPairedAlignment((PairedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts);
+                    drawPairedAlignment((PairedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts, thinReadBody);
                 } else if (alignment instanceof LinkedAlignment) {
-                    drawLinkedAlignment((LinkedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts);
+                    drawLinkedAlignment((LinkedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts, thinReadBody);
                 } else {
-                    drawAlignment(alignment, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, false);
+                    drawAlignment(alignment, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, false, thinReadBody);
                 }
             }
 
@@ -394,7 +398,7 @@ public class AlignmentRenderer {
 
     private void drawLinkedAlignment(LinkedAlignment alignment, Rectangle rowRect, RenderContext context,
                                      AlignmentTrack.RenderOptions renderOptions, boolean leaveMargin,
-                                     AlignmentCounts alignmentCounts) {
+                                     AlignmentCounts alignmentCounts, ThinReadBody thinReadBody) {
 
         double origin = context.getOrigin();
         double locScale = context.getScale();
@@ -425,7 +429,7 @@ public class AlignmentRenderer {
                     if (mixedStrand) alignmentColor = posStrandColor;
                     overlapped = i < barcodedAlignments.size() - 1 && al.getAlignmentEnd() > barcodedAlignments.get(i + 1).getAlignmentStart();
                 }
-                drawAlignment(al, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, overlapped);
+                drawAlignment(al, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody);
             }
         }
     }
@@ -497,7 +501,8 @@ public class AlignmentRenderer {
             RenderContext context,
             AlignmentTrack.RenderOptions renderOptions,
             boolean leaveMargin,
-            AlignmentCounts alignmentCounts) {
+            AlignmentCounts alignmentCounts,
+            ThinReadBody thinReadBody) {
 
         double locScale = context.getScale();
 
@@ -510,7 +515,7 @@ public class AlignmentRenderer {
         Graphics2D g = context.getGraphics2D("ALIGNMENT");
         g.setColor(alignmentColor1);
 
-        drawAlignment(pair.firstAlignment, rowRect, context, alignmentColor1, renderOptions, leaveMargin, alignmentCounts, overlapped);
+        drawAlignment(pair.firstAlignment, rowRect, context, alignmentColor1, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody);
 
         //If the paired alignment is in memory, we draw it.
         //However, we get the coordinates from the first alignment
@@ -520,7 +525,7 @@ public class AlignmentRenderer {
             }
             g.setColor(alignmentColor2);
 
-            drawAlignment(pair.secondAlignment, rowRect, context, alignmentColor2, renderOptions, leaveMargin, alignmentCounts, overlapped);
+            drawAlignment(pair.secondAlignment, rowRect, context, alignmentColor2, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody);
         } else {
             return;
         }
@@ -542,6 +547,81 @@ public class AlignmentRenderer {
     }
 
     /**
+     * Raster-only replacement for a normalized, square-capped one-pixel stroke.
+     * Work in device pixels: a logical fillRect is not equivalent at 2x or 1.25x.
+     * The cached graphics retains the original device clip and ordered alpha blending.
+     */
+    private static final class ThinReadBody {
+        private static final BasicStroke DEFAULT_STROKE = new BasicStroke();
+        private static final double DEVICE_LIMIT = 1 << 20;
+        private final Graphics2D graphics;
+        private final double scaleX;
+        private final double translateX;
+        private final int leftInset;
+        private final int top;
+        private final int height;
+
+        private ThinReadBody(Graphics2D graphics, AffineTransform transform, int y) {
+            this.graphics = graphics;
+            scaleX = transform.getScaleX();
+            translateX = transform.getTranslateX();
+            leftInset = scaleX == 2 ? -1 : 0;
+            double scaleY = transform.getScaleY();
+            int centerY = (int) Math.floor(y * scaleY + transform.getTranslateY() + 0.25);
+            top = centerY + (scaleY == 2 ? -1 : 0);
+            height = scaleY == 2 ? 2 : 1;
+        }
+
+        private static ThinReadBody create(RenderContext context, int y) {
+            Graphics2D source = context.getGraphics2D("ALIGNMENT");
+            // Do not change SVG/vector semantics or assume a custom Graphics2D rasterizer.
+            if (!source.getClass().getName().equals("sun.java2d.SunGraphics2D") ||
+                    !DEFAULT_STROKE.equals(source.getStroke()) ||
+                    !(source.getComposite() instanceof AlphaComposite composite) ||
+                    composite.getRule() != AlphaComposite.SRC_OVER ||
+                    source.getRenderingHint(RenderingHints.KEY_ANTIALIASING) == RenderingHints.VALUE_ANTIALIAS_ON ||
+                    source.getRenderingHint(RenderingHints.KEY_STROKE_CONTROL) == RenderingHints.VALUE_STROKE_PURE) {
+                return null;
+            }
+            AffineTransform transform = source.getTransform();
+            if (transform.getShearX() != 0 || transform.getShearY() != 0 ||
+                    !supportedScale(transform.getScaleX()) || !supportedScale(transform.getScaleY()) ||
+                    !quarterPixel(transform.getTranslateX()) || !quarterPixel(transform.getTranslateY()) ||
+                    Math.abs(y * transform.getScaleY() + transform.getTranslateY()) > DEVICE_LIMIT) {
+                return null;
+            }
+            Graphics2D graphics = context.getGraphics2D("THIN_READ_BODY");
+            graphics.setTransform(transform);
+            graphics.setClip(source.getClip());
+            graphics.setTransform(new AffineTransform());
+            graphics.setComposite(source.getComposite());
+            graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+            return new ThinReadBody(graphics, transform, y);
+        }
+
+        private static boolean supportedScale(double scale) {
+            return scale == 1 || scale == 1.25 || scale == 2;
+        }
+
+        private static boolean quarterPixel(double coordinate) {
+            return Math.abs(coordinate) <= DEVICE_LIMIT && coordinate * 4 == Math.rint(coordinate * 4);
+        }
+
+        private boolean fill(int start, int end) {
+            double first = Math.min(start, end) * scaleX + translateX;
+            double last = Math.max(start, end) * scaleX + translateX;
+            if (Math.abs(first) > DEVICE_LIMIT || Math.abs(last) > DEVICE_LIMIT) return false;
+            // Java2D normalizes endpoints to floor(deviceCoordinate + .25) + .25.
+            // Pixel-center coverage of the square caps includes both endpoints,
+            // even when they coincide or arrive in reverse order.
+            int left = (int) Math.floor(first + 0.25) + leftInset;
+            int right = (int) Math.floor(last + 0.25) + 1;
+            graphics.fillRect(left, top, right - left, height);
+            return true;
+        }
+    }
+
+    /**
      * Draw a (possibly gapped) alignment
      * <p>
      * NOTE: This is a large method, but every attempt to break it up results in methods with very long argument lists.
@@ -554,7 +634,8 @@ public class AlignmentRenderer {
             AlignmentTrack.RenderOptions renderOptions,
             boolean leaveMargin,
             AlignmentCounts alignmentCounts,
-            boolean overlapped) {
+            boolean overlapped,
+            ThinReadBody thinReadBody) {
 
         AlignmentBlock[] blocks = alignment.getAlignmentBlocks();
 
@@ -693,6 +774,8 @@ public class AlignmentRenderer {
         } else if (alignment.getMappingQuality() == 0 && renderOptions.isFlagZeroQualityAlignments()) {
             outlineGraphics = context.getGraphic2DForColor(OUTLINE_COLOR);
         }
+        if (thinReadBody != null) thinReadBody.graphics.setColor(gAlignment.getColor());
+
 
         // Compute arrow width from total length of alignment on reference
         double pixelLengthOnReference = alignment.getLengthOnReference() / locScale;
@@ -728,7 +811,9 @@ public class AlignmentRenderer {
             }
 
             if (h == 1) {
-                gAlignment.drawLine(blockPxStart, y, blockPxEnd, y);
+                if (thinReadBody == null || !thinReadBody.fill(blockPxStart, blockPxEnd)) {
+                    gAlignment.drawLine(blockPxStart, y, blockPxEnd, y);
+                }
             } else {
                 if (!overlapped) {
                     int pixelGap = (int) (AlignmentPacker.MIN_ALIGNMENT_SPACING / locScale);

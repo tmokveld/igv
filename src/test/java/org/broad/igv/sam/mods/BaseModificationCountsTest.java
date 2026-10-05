@@ -1,5 +1,8 @@
 package org.broad.igv.sam.mods;
 
+import htsjdk.samtools.SAMFileHeader;
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMSequenceRecord;
 import htsjdk.samtools.util.CloseableIterator;
 import org.broad.igv.prefs.Constants;
 import org.broad.igv.prefs.PreferencesManager;
@@ -21,6 +24,34 @@ public class BaseModificationCountsTest {
     @Before
     public void setup() {
         PreferencesManager.getPreferences().put(Constants.BASEMOD_VALIDATE_BASE_COUNT, "false");
+    }
+
+    @Test
+    public void zeroAbsentAndUnsignedCallsGiveDifferentCoverage() {
+        SAMFileHeader header = new SAMFileHeader();
+        header.addSequence(new SAMSequenceRecord("chr1", 1000));
+        SAMRecord record = new SAMRecord(header);
+        record.setReadName("modifications");
+        record.setReferenceName("chr1");
+        record.setAlignmentStart(101);
+        record.setCigarString("3M");
+        record.setReadString("CCC");
+        record.setAttribute("MM", "C+mh?,0,1;");
+        record.setAttribute("ML", new byte[]{0, 0, (byte) 255, 0});
+
+        BaseModificationCounts counts = new BaseModificationCounts();
+        counts.incrementCounts(new SAMAlignment(record));
+        BaseModificationKey modified = BaseModificationKey.getKey('C', '+', "m");
+        BaseModificationKey unmodified = BaseModificationKey.getKey('C', '+', "NONE_C");
+        assertEquals(1, counts.getCount(100, modified, 0, false));
+        assertEquals(0, counts.getCount(100, modified, 0.01f, false));
+        assertEquals(1, counts.getCount(100, unmodified, 1, true));
+        assertEquals(0, counts.getCount(101, modified, 0, false));
+        assertEquals(0, counts.getCount(101, unmodified, 0, true));
+        assertEquals(1, counts.getCount(102, modified, 1, false));
+        assertEquals(255, counts.getLikelihoodSum(102, modified, 1, false));
+        assertEquals(1, counts.getCount(102, modified, 1, true));
+        assertEquals(0, counts.getCount(102, unmodified, 0, true));
     }
 
     @Test

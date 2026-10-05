@@ -28,6 +28,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.broad.igv.prefs.Constants.*;
 import static org.junit.Assert.*;
@@ -206,6 +207,151 @@ public class AlignmentRendererReadBodyTest {
         }
     }
 
+    @Test
+    public void onePixelBodiesMatchLegacyLinesAtDeviceScalesAndFractionalOrigins() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        track.setColor(new Color(82, 113, 141, 167));
+        for (String cigar : List.of("40M", "1M2D40M")) {
+            SAMAlignment alignment = new SAMAlignment(record(cigar, false));
+            for (double deviceScale : new double[]{1, 1.25, 2}) {
+                for (double translation : new double[]{0, 0.25, 0.75}) {
+                    for (double origin : new double[]{9980.25, 9999.75, 10015.25, 10001.25}) {
+                        for (boolean curvedClip : new boolean[]{false, true}) {
+                            assertThinLegacy(List.of(alignment, alignment, alignment), origin, origin + 100,
+                                    graphics -> {
+                                        graphics.translate(translation, translation);
+                                        graphics.scale(deviceScale, deviceScale);
+                                        graphics.clip(curvedClip ? new java.awt.geom.Ellipse2D.Double(12, 1, 42, 4)
+                                                : new Rectangle(12, 2, 42, 1));
+                                    });
+                        }
+                    }
+                }
+            }
+        }
+        track.getRenderOptions().setShowAllBases(true);
+        assertLegacy(List.of(new SAMAlignment(record("40M", false))), 9980.25, 10080.25, 100, 1, 2);
+    }
+
+    @Test
+    public void onePixelCollapsedAndReversedBodiesKeepInclusiveEndpoints() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        // Exercise the actual renderer with degenerate block geometry, not the
+        // primitive helper. Reversed spans retain drawLine's two inclusive caps.
+        SAMAlignment alignment = new SAMAlignment(record("40M", false)) {
+            @Override
+            public AlignmentBlock[] getAlignmentBlocks() {
+                return new AlignmentBlock[]{
+                        new AlignmentBlockImpl(10000, new byte[0], null, 0, 0, 'M'),
+                        new AlignmentBlockImpl(10010, new byte[0], null, 0, -4, 'M'),
+                        new AlignmentBlockImpl(10020, new byte[0], null, 0, 20, 'M')};
+            }
+        };
+        track.getSelectedReadNames().put(alignment.getReadName(), new Color(47, 129, 89, 167));
+        for (double scaleX : new double[]{1, 1.25, 2}) {
+            for (double scaleY : new double[]{1, 1.25, 2}) {
+                assertThinLegacy(List.of(alignment, alignment), 9990.25, 10090.25,
+                        graphics -> graphics.scale(scaleX, scaleY));
+            }
+        }
+    }
+
+    @Test
+    public void onePixelUnsupportedGraphicsStateKeepsLegacyRasterization() {
+        SAMAlignment alignment = new SAMAlignment(record("40M", false));
+        List<Consumer<Graphics2D>> configurations = List.of(
+                graphics -> graphics.scale(1.5, 1.5),
+                graphics -> graphics.translate(0.125, 0.125),
+                graphics -> { graphics.translate(5, 1); graphics.rotate(0.12); },
+                graphics -> graphics.shear(0.2, 0.1),
+                graphics -> { graphics.translate(100, 10); graphics.scale(-1, -1); },
+                graphics -> { graphics.scale(2, 2); graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON); },
+                graphics -> { graphics.scale(2, 2); graphics.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE); },
+                graphics -> graphics.setStroke(new BasicStroke(2)),
+                graphics -> graphics.setStroke(new BasicStroke(1, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER)),
+                graphics -> graphics.setStroke(new BasicStroke(1, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)),
+                graphics -> graphics.setStroke(new BasicStroke(1, BasicStroke.CAP_SQUARE, BasicStroke.JOIN_MITER, 10, new float[]{2, 3}, 0)));
+        for (Track.DisplayMode mode : List.of(Track.DisplayMode.SQUISHED, Track.DisplayMode.EXPANDED)) {
+            track.setDisplayMode(mode);
+            for (Consumer<Graphics2D> configuration : configurations) {
+                assertThinLegacy(List.of(alignment, alignment), 9980.25, 10080.25, configuration);
+            }
+        }
+        SAMAlignment distantEndpoints = new SAMAlignment(record("40M", false)) {
+            @Override
+            public AlignmentBlock[] getAlignmentBlocks() {
+                return new AlignmentBlock[]{
+                        new AlignmentBlockImpl(-2000000, new byte[0], null, 0, 2010020, 'M'),
+                        new AlignmentBlockImpl(10020, new byte[0], null, 0, 2000000, 'M')};
+            }
+        };
+        assertThinLegacy(List.of(distantEndpoints), 9990, 10090, graphics -> graphics.scale(2, 2));
+    }
+
+    @Test
+    public void onePixelSvgMatchesLegacyLineCoverageAndAlpha() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        SAMAlignment alignment = new SAMAlignment(record("1M2D40M", false));
+        List<Alignment> alignments = List.of(alignment, alignment);
+        ReferenceFrame frame = frame(9980.25, 10080.25, 100);
+        for (double scale : new double[]{1, 1.25, 2}) {
+            SVGGraphics2D actual = new SVGGraphics2D(GenericDOMImplementation.getDOMImplementation()
+                    .createDocument("http://www.w3.org/2000/svg", "svg", null));
+            SVGGraphics2D expected = new SVGGraphics2D(GenericDOMImplementation.getDOMImplementation()
+                    .createDocument("http://www.w3.org/2000/svg", "svg", null));
+            try {
+                actual.setSVGCanvasSize(new Dimension(200, 48));
+                expected.setSVGCanvasSize(new Dimension(200, 48));
+                actual.scale(scale, scale);
+                expected.scale(scale, scale);
+                render(alignments, actual, frame, 1);
+                for (Alignment read : alignments) legacyPolygon(expected, read, frame, 100, 1);
+                Element actualRoot = actual.getRoot();
+                Element expectedRoot = expected.getRoot();
+                assertEquals("Repeated SVG strokes retain ordered alpha", compositeGray(2), vectorPixel(actualRoot, 30, 2.125));
+                assertEquals("The stroke stays centered on y, not below it", Color.WHITE.getRGB(), vectorPixel(actualRoot, 30, 2.875));
+                for (double y = 0.125; y < 5; y += 0.25) {
+                    for (double x = 0.125; x < 100; x += 0.25) {
+                        assertEquals("SVG coverage at " + x + "," + y + "; scale=" + scale,
+                                vectorPixel(expectedRoot, x, y), vectorPixel(actualRoot, x, y));
+                    }
+                }
+            } finally {
+                actual.dispose();
+                expected.dispose();
+            }
+        }
+    }
+
+
+    private void assertThinLegacy(List<Alignment> alignments, double start, double end, Consumer<Graphics2D> configuration) {
+        BufferedImage actual = new BufferedImage(200, 48, BufferedImage.TYPE_INT_ARGB_PRE);
+        BufferedImage expected = new BufferedImage(200, 48, BufferedImage.TYPE_INT_ARGB_PRE);
+        Graphics2D actualGraphics = graphics(actual, 1);
+        Graphics2D expectedGraphics = graphics(expected, 1);
+        ReferenceFrame frame = frame(start, end, 100);
+        try {
+            configuration.accept(actualGraphics);
+            configuration.accept(expectedGraphics);
+            render(alignments, actualGraphics, frame, 1);
+            for (Alignment alignment : alignments) legacyPolygon(expectedGraphics, alignment, frame, 100, 1);
+        } finally {
+            actualGraphics.dispose();
+            expectedGraphics.dispose();
+        }
+        assertSamePixels(expected, actual, "origin=" + start);
+    }
+
+    private static void assertSamePixels(BufferedImage expected, BufferedImage actual, String description) {
+        assertEquals(expected.getWidth(), actual.getWidth());
+        assertEquals(expected.getHeight(), actual.getHeight());
+        for (int y = 0; y < actual.getHeight(); y++) {
+            for (int x = 0; x < actual.getWidth(); x++) {
+                assertEquals(description + "; pixel=" + x + "," + y, expected.getRGB(x, y), actual.getRGB(x, y));
+            }
+        }
+    }
+
     private SAMRecord record(String cigar, boolean negative) {
         SAMRecord record = new SAMRecord(header);
         record.setReadName("body");
@@ -280,9 +426,8 @@ public class AlignmentRendererReadBodyTest {
         return graphics;
     }
 
-    // Independent pre-optimization oracle: every block is the original six-point
-    // polygon, including collapsed tips/zero-width blocks. No renderer shape helper
-    // or optimized body drawing is used to construct the expected image.
+    // Independent pre-optimization oracle: one-pixel bodies use drawLine and
+    // taller bodies use the original six-point polygon. Neither uses the fast path.
     private void legacyPolygon(Graphics2D graphics, Alignment alignment, ReferenceFrame frame, int width, int height) {
         double origin = frame.getOrigin();
         double scale = frame.getScale();
@@ -332,8 +477,10 @@ public class AlignmentRendererReadBodyTest {
             int spacing = (int) (AlignmentPacker.MIN_ALIGNMENT_SPACING / scale);
             if (spacing < arrow) arrow = Math.max(0, arrow - spacing);
             boolean pointed = height > 6 && (first && start > 0 || last && end < width);
-            start = Math.max(0, start);
-            end = Math.min(width, end);
+            if (height > 1) {
+                start = Math.max(0, start);
+                end = Math.min(width, end);
+            }
             int leftTip = start - (first && alignment.isNegativeStrand() && pointed ? arrow : 0);
             int rightTip = end + (last && !alignment.isNegativeStrand() && pointed ? arrow : 0);
             Polygon body = new Polygon(new int[]{leftTip, start, end, rightTip, end, start},
@@ -342,21 +489,24 @@ public class AlignmentRendererReadBodyTest {
             try {
                 fill.setComposite(AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.75f));
                 fill.setColor(color);
-                if (texture) fill.setPaint(legacyTexture(color));
-                fill.fill(body);
+                if (height == 1) fill.drawLine(start, y, end, y);
+                else {
+                    if (texture) fill.setPaint(legacyTexture(color));
+                    fill.fill(body);
+                }
             } finally {
                 fill.dispose();
             }
             Graphics2D decoration = (Graphics2D) graphics.create();
             try {
-                if (outline != null) {
+                if (height > 1 && outline != null) {
                     decoration.setColor(outline);
                     decoration.setStroke(new BasicStroke(outlineWidth));
                     decoration.draw(body);
                 }
                 decoration.setColor(new Color(255, 20, 147));
                 decoration.setStroke(new BasicStroke(height > 5 ? 1.2f : 1));
-                if (preferences.getAsBoolean(SAM_FLAG_CLIPPING)) {
+                if (height > 1 && preferences.getAsBoolean(SAM_FLAG_CLIPPING)) {
                     if (first && alignment.getClippingCounts().getLeft() > 0) {
                         decoration.drawLine(leftTip, y + height / 2, start, y + height);
                         decoration.drawLine(start, y - 1, leftTip, y + height / 2);
@@ -429,7 +579,16 @@ public class AlignmentRendererReadBodyTest {
             for (int i = 0; i < elements.getLength(); i++) {
                 Element element = (Element) elements.item(i);
                 Shape shape;
-                if (element.getTagName().equals("rect")) {
+                boolean strokedLine = element.getTagName().equals("line");
+                if (strokedLine) {
+                    String cap = inherited(element, "stroke-linecap", "butt");
+                    int capStyle = cap.equals("square") ? BasicStroke.CAP_SQUARE :
+                            cap.equals("round") ? BasicStroke.CAP_ROUND : BasicStroke.CAP_BUTT;
+                    BasicStroke stroke = new BasicStroke(Float.parseFloat(inherited(element, "stroke-width", "1")),
+                            capStyle, BasicStroke.JOIN_MITER);
+                    shape = stroke.createStrokedShape(new java.awt.geom.Line2D.Double(number(element, "x1"),
+                            number(element, "y1"), number(element, "x2"), number(element, "y2")));
+                } else if (element.getTagName().equals("rect")) {
                     shape = new java.awt.geom.Rectangle2D.Double(number(element, "x"), number(element, "y"),
                             number(element, "width"), number(element, "height"));
                 } else if (element.getTagName().equals("polygon")) {
@@ -441,11 +600,12 @@ public class AlignmentRendererReadBodyTest {
                     shape = path;
                 } else continue;
                 if (!shape.contains(x, y)) continue;
-                String fill = inherited(element, "fill", "black");
-                Color color = ColorUtilities.stringToColorNoDefault(fill);
-                assertNotNull("Expected a valid SVG body fill: " + fill, color);
+                String paint = inherited(element, strokedLine ? "stroke" : "fill", "black");
+                if (paint.equals("none")) continue;
+                Color color = ColorUtilities.stringToColorNoDefault(paint);
+                assertNotNull("Expected a valid SVG body color: " + paint, color);
                 graphics.setColor(color);
-                float alpha = Float.parseFloat(inherited(element, "fill-opacity", "1"));
+                float alpha = Float.parseFloat(inherited(element, strokedLine ? "stroke-opacity" : "fill-opacity", "1"));
                 for (Node node = element; node instanceof Element; node = node.getParentNode()) {
                     String opacity = ((Element) node).getAttribute("opacity");
                     if (!opacity.isEmpty()) alpha *= Float.parseFloat(opacity);

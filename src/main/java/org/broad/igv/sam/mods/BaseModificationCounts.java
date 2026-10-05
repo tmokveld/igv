@@ -67,12 +67,10 @@ public class BaseModificationCounts {
                     BaseModificationKey maxKey = null;
                     int noModLH = 255;
                     for (BaseModificationSet bmSet : baseModificationSets) {
-                        final Map<Integer, Byte> bmSetLikelihoods = bmSet.getLikelihoods();
-                        if (bmSetLikelihoods != null && bmSet.containsPosition(readIdx)) {
-                            byte byteLikelihood = bmSetLikelihoods.get(readIdx);
+                        int lh = bmSet.getLikelihood(readIdx);
+                        if (lh >= 0) {
                             BaseModificationKey modKey = BaseModificationKey.getKey(bmSet.getBase(), bmSet.getStrand(), bmSet.getModification());
                             allModifications.add(modKey);
-                            int lh = Byte.toUnsignedInt(byteLikelihood);
                             noModLH -= lh;
                             if (lh > maxLH) {
                                 canonicalBase = bmSet.getCanonicalBase();   // This has to be the same for all modifications at this position

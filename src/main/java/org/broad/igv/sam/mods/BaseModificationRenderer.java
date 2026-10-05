@@ -60,8 +60,8 @@ public class BaseModificationRenderer {
             String modification = null;
             char canonicalBase = 0;
             for (BaseModificationSet bmSet : baseModificationSets) {
-                if (bmSet.containsPosition(i)) {
-                    int lh = Byte.toUnsignedInt(bmSet.getLikelihoods().get(i));
+                int lh = bmSet.getLikelihood(i);
+                if (lh >= 0) {
                     noModLh -= lh;
                     if ((filter == null || filter.pass(bmSet.getModification(), canonicalBase)) && (modification == null || lh > maxLh)) {
                         modification = bmSet.getModification();

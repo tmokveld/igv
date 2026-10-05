@@ -7,17 +7,27 @@ import java.util.Map;
 
 public class BaseModificationSet {
 
-    char base;
-    char strand;
-    String modification;
-    Map<Integer, Byte> likelihoods;
-    char canonicalBase;
+    private final char base;
+    private final char strand;
+    private final String modification;
+    private final char canonicalBase;
 
-    public BaseModificationSet(char base, char strand, String modification,  Map<Integer, Byte> likelihoods) {
+    // Zero marks an empty slot; read positions are stored as position + 1.
+    // Separate keys keep absent calls distinct from likelihoods 0 and unsigned 255.
+    // The parser pre-counts calls, keeping occupancy at most 75% without resizing.
+    private final int[] positions;
+    private final byte[] likelihoods;
+
+    BaseModificationSet(char base, char strand, String modification, int expectedCalls) {
         this.base = base;
         this.modification = modification;
         this.strand = strand;
-        this.likelihoods = likelihoods;
+        int capacity = 8;
+        while (expectedCalls > capacity - capacity / 4) {
+            capacity <<= 1;
+        }
+        this.positions = new int[capacity];
+        this.likelihoods = new byte[capacity];
         this.canonicalBase = strand == '+' ? base : (char) SequenceUtil.complement((byte) base);
     }
 
@@ -37,12 +47,40 @@ public class BaseModificationSet {
         return strand;
     }
 
-    public Map<Integer, Byte> getLikelihoods() {
-        return likelihoods;
+    /**
+     * Returns the unsigned likelihood (0..255), or -1 if the read position has no call.
+     */
+    public int getLikelihood(int pos) {
+        if (pos < 0) return -1;
+        int key = pos + 1;
+        int slot = slot(key, positions.length - 1);
+        while (positions[slot] != 0) {
+            if (positions[slot] == key) {
+                return Byte.toUnsignedInt(likelihoods[slot]);
+            }
+            slot = (slot + 1) & (positions.length - 1);
+        }
+        return -1;
     }
 
-    public boolean containsPosition(Integer pos) {
-        return likelihoods.containsKey(pos);
+    public boolean containsPosition(int pos) {
+        return getLikelihood(pos) >= 0;
+    }
+
+    // Only the MM parser writes calls; consumers cannot mutate the likelihood storage.
+    void putLikelihood(int pos, byte likelihood) {
+        int key = pos + 1;
+        int slot = slot(key, positions.length - 1);
+        while (positions[slot] != 0 && positions[slot] != key) {
+            slot = (slot + 1) & (positions.length - 1);
+        }
+        positions[slot] = key;
+        likelihoods[slot] = likelihood;
+    }
+
+    private static int slot(int key, int mask) {
+        int hash = key * 0x9E3779B9;
+        return (hash ^ (hash >>> 16)) & mask;
     }
 
     /**
@@ -51,7 +89,9 @@ public class BaseModificationSet {
      * @return
      */
     public String valueString(int pos) {
-        int l = (int) (100.0 * Byte.toUnsignedInt(likelihoods.get(pos)) / 255);
+        int likelihood = getLikelihood(pos);
+        if (likelihood < 0) throw new NullPointerException("No modification call at read position " + pos);
+        int l = (int) (100.0 * likelihood / 255);
         return "Base modification: " +
                 ((codeValues.containsKey(modification)) ? codeValues.get(modification) : modification) +  " (" + l + "%)";
     }

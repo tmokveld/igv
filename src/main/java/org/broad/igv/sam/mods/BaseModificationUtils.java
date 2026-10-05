@@ -111,10 +111,20 @@ public class BaseModificationUtils {
                 }
 
 
-                // Create a positions -> likelihood map for each modification
-                Map<String, Map<Integer, Byte>> likelihoodMap = new HashMap<>();
+                int expectedCalls = tokens.length - 1;
+                if (skippedBasesCalled) {
+                    expectedCalls = 0;
+                    for (byte nucleotide : sequence) {
+                        if (base == 'N' || nucleotide == base) expectedCalls++;
+                    }
+                }
+                // Repeated codes within one token share calls: the last ML value wins,
+                // while each occurrence still contributes a set in the original order.
+                Map<String, BaseModificationSet> setsByModification = new HashMap<>();
                 for (String m : modifications) {
-                    likelihoodMap.put(m, new HashMap<>());
+                    if (!setsByModification.containsKey(m)) {
+                        setsByModification.put(m, new BaseModificationSet(base, strand, m, expectedCalls));
+                    }
                 }
 
                 int idx = 1;  // position array index,  positions start at index 1
@@ -130,7 +140,7 @@ public class BaseModificationUtils {
                         if (matchCount == skip) { // && idx < tokens.length) {
                             for (String modification : modifications) {
                                 byte likelihood = ml == null ? (byte) 255 : ml[mlIdx++];
-                                likelihoodMap.get(modification).put(position, likelihood);
+                                setsByModification.get(modification).putLikelihood(position, likelihood);
                             }
                             if (idx < tokens.length) {
                                 skip = Integer.parseInt(tokens[idx++]);
@@ -149,7 +159,7 @@ public class BaseModificationUtils {
                                 // Skipped bases =>  "modification present with 0% probability"
                                 for (String modification : modifications) {
                                     byte likelihood = 0;
-                                    likelihoodMap.get(modification).put(position, likelihood);
+                                    setsByModification.get(modification).putLikelihood(position, likelihood);
                                 }
                             }
                             matchCount++;
@@ -159,7 +169,7 @@ public class BaseModificationUtils {
                 }
 
                 for (String m : modifications) {
-                    modificationSets.add(new BaseModificationSet(base, strand, m, likelihoodMap.get(m)));
+                    modificationSets.add(setsByModification.get(m));
                 }
             }
         }

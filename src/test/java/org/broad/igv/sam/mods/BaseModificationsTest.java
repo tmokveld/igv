@@ -11,6 +11,100 @@ import static org.junit.Assert.*;
 
 public class BaseModificationsTest {
 
+    private static List<Integer> positionsOf(BaseModificationSet calls, int readLength) {
+        List<Integer> positions = new ArrayList<>();
+        for (int position = 0; position < readLength; position++) {
+            if (calls.containsPosition(position)) positions.add(position);
+        }
+        return positions;
+    }
+
+    @Test
+    public void absentZeroAndUnsignedLikelihoodsStayDistinct() {
+        BaseModificationSet unknown = BaseModificationUtils.getBaseModificationSets(
+                "C+m?,0,1;", new byte[]{0, (byte) 255}, "CACCC".getBytes(), false).get(0);
+        assertEquals(0, unknown.getLikelihood(0));
+        assertEquals(-1, unknown.getLikelihood(1));
+        assertEquals(-1, unknown.getLikelihood(2));
+        assertEquals(255, unknown.getLikelihood(3));
+        assertEquals(-1, unknown.getLikelihood(4));
+        assertTrue(unknown.containsPosition(0));
+        assertFalse(unknown.containsPosition(2));
+        assertEquals("Base modification: 5mC (0%)", unknown.valueString(0));
+        assertEquals("Base modification: 5mC (100%)", unknown.valueString(3));
+
+        BaseModificationSet skipped = BaseModificationUtils.getBaseModificationSets(
+                "C+m.,0,1;", new byte[]{0, (byte) 255}, "CACCC".getBytes(), false).get(0);
+        assertEquals(-1, skipped.getLikelihood(1));
+        assertEquals(0, skipped.getLikelihood(2));
+        assertEquals(0, skipped.getLikelihood(4));
+    }
+
+    @Test
+    public void repeatedCombinedCodesKeepLastValueAndTokenOrder() {
+        List<BaseModificationSet> calls = BaseModificationUtils.getBaseModificationSets(
+                "C+mmh?,0;C+m?,0;", new byte[]{10, 20, 30, 40}, "CC".getBytes(), false);
+        assertEquals(Arrays.asList("m", "m", "h", "m"),
+                Arrays.asList(calls.get(0).getModification(), calls.get(1).getModification(),
+                        calls.get(2).getModification(), calls.get(3).getModification()));
+        assertEquals(20, calls.get(0).getLikelihood(0));
+        assertEquals(20, calls.get(1).getLikelihood(0));
+        assertEquals(30, calls.get(2).getLikelihood(0));
+        assertEquals(40, calls.get(3).getLikelihood(0));
+        for (BaseModificationSet call : calls) assertEquals(-1, call.getLikelihood(1));
+    }
+
+    @Test
+    public void reverseCombinedCallsKeepUnsignedValuesAndSkippedBases() {
+        List<BaseModificationSet> calls = BaseModificationUtils.getBaseModificationSets(
+                "C-mh.,0,1;", new byte[]{(byte) 255, 0, (byte) 128, 127},
+                "GGAG".getBytes(), true);
+        assertEquals('G', calls.get(0).getCanonicalBase());
+        assertEquals('-', calls.get(0).getStrand());
+        assertEquals(255, calls.get(0).getLikelihood(3));
+        assertEquals(0, calls.get(1).getLikelihood(3));
+        assertEquals(0, calls.get(0).getLikelihood(1));
+        assertEquals(0, calls.get(1).getLikelihood(1));
+        assertEquals(128, calls.get(0).getLikelihood(0));
+        assertEquals(127, calls.get(1).getLikelihood(0));
+        assertEquals(-1, calls.get(0).getLikelihood(2));
+    }
+
+    @Test
+    public void longReadsAndDenseCallsPreserveEveryPosition() {
+        byte[] sequence = "C".repeat(65537).getBytes();
+        BaseModificationSet sparse = BaseModificationUtils.getBaseModificationSets(
+                "C+m?,0,65535;", new byte[]{(byte) 255, 0}, sequence, false).get(0);
+        assertEquals(255, sparse.getLikelihood(0));
+        assertEquals(-1, sparse.getLikelihood(65535));
+        assertEquals(0, sparse.getLikelihood(65536));
+
+        byte[] likelihoods = new byte[3072];
+        for (int i = 0; i < likelihoods.length; i++) likelihoods[i] = (byte) i;
+        BaseModificationSet dense = BaseModificationUtils.getBaseModificationSets(
+                "N+n?,0" + ",0".repeat(likelihoods.length - 1) + ";",
+                likelihoods, "A".repeat(likelihoods.length).getBytes(), false).get(0);
+        for (int i = 0; i < likelihoods.length; i++) {
+            assertEquals(Byte.toUnsignedInt(likelihoods[i]), dense.getLikelihood(i));
+        }
+        assertEquals(-1, dense.getLikelihood(-1));
+        assertEquals(-1, dense.getLikelihood(likelihoods.length));
+    }
+
+    @Test
+    public void emptyCallsAndMissingMlPreserveExistingMeaning() {
+        assertTrue(BaseModificationUtils.getBaseModificationSets(
+                "C+m?;", null, "CCC".getBytes(), false).isEmpty());
+        BaseModificationSet noCanonicalBases = BaseModificationUtils.getBaseModificationSets(
+                "C+m?,0;", null, "AAA".getBytes(), false).get(0);
+        assertEquals(-1, noCanonicalBases.getLikelihood(0));
+        BaseModificationSet noMl = BaseModificationUtils.getBaseModificationSets(
+                "C+m?,1;", null, "CCC".getBytes(), false).get(0);
+        assertEquals(-1, noMl.getLikelihood(0));
+        assertEquals(255, noMl.getLikelihood(1));
+        assertEquals(-1, noMl.getLikelihood(2));
+    }
+
     @Test
     public void testOrientTopFwd() {
 
@@ -25,15 +119,15 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('C', sequence[pos]);
         }
 
         int idx = 0;
-        assertEquals(ml[idx++], (byte) likelihoods.get(7));
-        assertEquals(ml[idx++], (byte) likelihoods.get(30));
-        assertEquals(ml[idx++], (byte) likelihoods.get(31));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(7));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(30));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(31));
     }
 
     @Test
@@ -54,15 +148,15 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('G', sequence[pos]);
         }
 
         int idx = 0;
-        assertEquals(ml[idx++], (byte) likelihoods.get(7));
-        assertEquals(ml[idx++], (byte) likelihoods.get(30));
-        assertEquals(ml[idx++], (byte) likelihoods.get(31));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(7));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(30));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(31));
     }
 
     @Test
@@ -80,15 +174,15 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('G', sequence[pos]);
         }
 
         int idx = 0;
-        assertEquals(ml[idx++], (byte) likelihoods.get(28));
-        assertEquals(ml[idx++], (byte) likelihoods.get(5));
-        assertEquals(ml[idx++], (byte) likelihoods.get(4));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(28));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(5));
+        assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(4));
     }
 
 
@@ -110,15 +204,15 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('G', sequence[pos]);
         }
 
-        assertEquals(ml[0], (byte) likelihoods.get(1));
-        assertEquals(ml[1], (byte) likelihoods.get(2));
-        assertEquals(ml[2], (byte) likelihoods.get(18));
-        assertEquals(ml[3], (byte) likelihoods.get(23));
+        assertEquals(ml[0], (byte) likelihoods.getLikelihood(1));
+        assertEquals(ml[1], (byte) likelihoods.getLikelihood(2));
+        assertEquals(ml[2], (byte) likelihoods.getLikelihood(18));
+        assertEquals(ml[3], (byte) likelihoods.getLikelihood(23));
     }
 
     @Test
@@ -135,16 +229,16 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('C', sequence[pos]);
         }
 
 
-        assertEquals(ml[0], (byte) likelihoods.get(34));
-        assertEquals(ml[1], (byte) likelihoods.get(33));
-        assertEquals(ml[2], (byte) likelihoods.get(17));
-        assertEquals(ml[3], (byte) likelihoods.get(12));
+        assertEquals(ml[0], (byte) likelihoods.getLikelihood(34));
+        assertEquals(ml[1], (byte) likelihoods.getLikelihood(33));
+        assertEquals(ml[2], (byte) likelihoods.getLikelihood(17));
+        assertEquals(ml[3], (byte) likelihoods.getLikelihood(12));
 
     }
 
@@ -166,29 +260,29 @@ public class BaseModificationsTest {
         for (BaseModificationSet bms : modificationSets) {
             String mod = bms.getModification();
             if (mod.equals("m")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
                 int idx = 0;
-                assertEquals(ml[idx++], (byte) likelihoods.get(6));
-                assertEquals(ml[idx++], (byte) likelihoods.get(17));
-                assertEquals(ml[idx++], (byte) likelihoods.get(20));
-                assertEquals(ml[idx++], (byte) likelihoods.get(31));
-                assertEquals(ml[idx++], (byte) likelihoods.get(34));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(6));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(17));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(20));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(31));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(34));
 
             } else if (mod.equals("76792")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
                 int idx = 5;
-                assertEquals(ml[idx++], (byte) likelihoods.get(19));
-                assertEquals(ml[idx++], (byte) likelihoods.get(34));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(19));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(34));
 
             } else if (mod.equals("n")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                assertEquals(ml[7], (byte) likelihoods.get(15));
+                BaseModificationSet likelihoods = bms;
+                assertEquals(ml[7], (byte) likelihoods.getLikelihood(15));
             }
         }
     }
@@ -218,29 +312,29 @@ public class BaseModificationsTest {
         for (BaseModificationSet bms : modificationSets) {
             String mod = bms.getModification();
             if (mod.equals("m") && bms.getBase() == 'C') {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
                 int idx = 0;
-                assertEquals(ml[idx++], (byte) likelihoods.get(7));
-                assertEquals(ml[idx++], (byte) likelihoods.get(30));
-                assertEquals(ml[idx++], (byte) likelihoods.get(31));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(7));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(30));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(31));
 
             } else if (mod.equals("m") && bms.getBase() == 'G') {
                 int idx = 3;
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('G', sequence[pos]);
                 }
-                assertEquals(ml[idx++], (byte) likelihoods.get(1));
-                assertEquals(ml[idx++], (byte) likelihoods.get(12));
-                assertEquals(ml[idx++], (byte) likelihoods.get(13));
-                assertEquals(ml[idx++], (byte) likelihoods.get(22));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(1));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(12));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(13));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(22));
 
             } else if (mod.equals("o")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                assertEquals(ml[7], (byte) likelihoods.get(13));
+                BaseModificationSet likelihoods = bms;
+                assertEquals(ml[7], (byte) likelihoods.getLikelihood(13));
             }
         }
     }
@@ -268,31 +362,31 @@ public class BaseModificationsTest {
         for (BaseModificationSet bms : modificationSets) {
             String mod = bms.getModification();
             if (mod.equals("m")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
                 int idx = 0;
-                assertEquals(ml[idx++], (byte) likelihoods.get(6));
-                assertEquals(ml[idx++], (byte) likelihoods.get(17));
-                assertEquals(ml[idx++], (byte) likelihoods.get(20));
-                assertEquals(ml[idx++], (byte) likelihoods.get(31));
-                assertEquals(ml[idx++], (byte) likelihoods.get(34));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(6));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(17));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(20));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(31));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(34));
 
             } else if (mod.equals("h")) {
                 int idx = 5;
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
-                assertEquals(ml[idx++], (byte) likelihoods.get(19));
-                assertEquals(ml[idx++], (byte) likelihoods.get(34));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(19));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(34));
 
             } else if (mod.equals("n")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
+                BaseModificationSet likelihoods = bms;
                 int idx = 7;
-                assertEquals(ml[idx++], (byte) likelihoods.get(15));
-                assertEquals(ml[idx++], (byte) likelihoods.get(18));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(15));
+                assertEquals(ml[idx++], (byte) likelihoods.getLikelihood(18));
 
             }
         }
@@ -320,32 +414,32 @@ public class BaseModificationsTest {
         for (BaseModificationSet bms : modificationSets) {
             String mod = bms.getModification();
             if (mod.equals("m")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
-                assertEquals((byte) 77, (byte) likelihoods.get(6));
-                assertEquals((byte) 103, (byte) likelihoods.get(17));
-                assertEquals((byte) 128, (byte) likelihoods.get(19));
-                assertEquals((byte) 154, (byte) likelihoods.get(20));
-                assertEquals((byte) 179, (byte) likelihoods.get(31));
-                assertEquals((byte) 204, (byte) likelihoods.get(34));
+                assertEquals((byte) 77, (byte) likelihoods.getLikelihood(6));
+                assertEquals((byte) 103, (byte) likelihoods.getLikelihood(17));
+                assertEquals((byte) 128, (byte) likelihoods.getLikelihood(19));
+                assertEquals((byte) 154, (byte) likelihoods.getLikelihood(20));
+                assertEquals((byte) 179, (byte) likelihoods.getLikelihood(31));
+                assertEquals((byte) 204, (byte) likelihoods.getLikelihood(34));
 
             } else if (mod.equals("h")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                for (Integer pos : likelihoods.keySet()) {
+                BaseModificationSet likelihoods = bms;
+                for (Integer pos : positionsOf(likelihoods, sequence.length)) {
                     assertEquals('C', sequence[pos]);
                 }
-                assertEquals((byte) 159, (byte) likelihoods.get(6));
-                assertEquals((byte) 133, (byte) likelihoods.get(17));
-                assertEquals((byte) 108, (byte) likelihoods.get(19));
-                assertEquals((byte) 82, (byte) likelihoods.get(20));
-                assertEquals((byte) 57, (byte) likelihoods.get(31));
-                assertEquals((byte) 31, (byte) likelihoods.get(34));
+                assertEquals((byte) 159, (byte) likelihoods.getLikelihood(6));
+                assertEquals((byte) 133, (byte) likelihoods.getLikelihood(17));
+                assertEquals((byte) 108, (byte) likelihoods.getLikelihood(19));
+                assertEquals((byte) 82, (byte) likelihoods.getLikelihood(20));
+                assertEquals((byte) 57, (byte) likelihoods.getLikelihood(31));
+                assertEquals((byte) 31, (byte) likelihoods.getLikelihood(34));
 
             } else if (mod.equals("n")) {
-                Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-                assertEquals((byte) 240, (byte) likelihoods.get(15));
+                BaseModificationSet likelihoods = bms;
+                assertEquals((byte) 240, (byte) likelihoods.getLikelihood(15));
 
             }
         }
@@ -364,8 +458,8 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('C', sequence[pos]);
         }
     }
@@ -381,8 +475,8 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        for (Integer pos : positionsOf(likelihoods, sequence.length)) {
             assertEquals('G', sequence[pos]);
         }
     }
@@ -401,9 +495,9 @@ public class BaseModificationsTest {
         assertEquals(1, modificationSets.size());
 
         BaseModificationSet bmSet = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bmSet.getLikelihoods();
-        assertEquals(expectedPositions.size(), likelihoods.size());
-        for (Integer pos : likelihoods.keySet()) {
+        BaseModificationSet likelihoods = bmSet;
+        assertEquals(expectedPositions.size(), positionsOf(likelihoods, seq.length()).size());
+        for (Integer pos : positionsOf(likelihoods, seq.length())) {
             assertTrue(expectedPositions.contains(pos));
             assertEquals('G', seq.charAt(pos));
         }
@@ -430,9 +524,8 @@ public class BaseModificationsTest {
 
         for (BaseModificationSet bms : modificationSets) {
             char base = bms.getBase();
-            Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-            List<Integer> positions = new ArrayList<>(likelihoods.keySet());
-            positions.sort((o1, o2) -> o1 - o2);
+            BaseModificationSet likelihoods = bms;
+            List<Integer> positions = positionsOf(likelihoods, seq.length());
             for (Integer pos : positions) {
                 assertTrue(base == seq.charAt(pos));
             }
@@ -458,8 +551,8 @@ public class BaseModificationsTest {
         int cCount = (int) seq.codePoints().filter(ch -> ch == 'C').count();
 
         BaseModificationSet bms = modificationSets.get(0);
-        Map<Integer, Byte> likelihoods = bms.getLikelihoods();
-        assertEquals(cCount, likelihoods.size());
+        BaseModificationSet likelihoods = bms;
+        assertEquals(cCount, positionsOf(likelihoods, seq.length()).size());
 
     }
 
