@@ -1,0 +1,179 @@
+name: Build macOS app
+run-name: macOS app · ${{ inputs.ref || github.ref_name }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit SHA, tag, or branch to build (must exist in this repository)
+        required: true
+        type: string
+  push:
+    tags:
+      - 'v*-patch.*'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    outputs:
+      artifact: ${{ steps.metadata.outputs.artifact }}
+      sha: ${{ steps.metadata.outputs.sha }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Keep the build recipe here, not in the selected checkout: older commits
+      # need the Gradle packaging tasks, but need not contain this workflow.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Identify source and version
+        id: metadata
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-patch\.[0-9]+$ ]]; then
+              echo 'Release tags must look like v2.19.8-patch.1' >&2
+              exit 1
+            fi
+            version=${GITHUB_REF_NAME#v}
+          else
+            base=$(git describe --tags --match 'v[0-9]*' --abbrev=0)
+            base=${base#v}
+            base=${base%%-*}
+            if [[ ! "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "Cannot derive the IGV version from the nearest version tag" >&2
+              exit 1
+            fi
+            version="$base-dev.${sha:0:12}"
+          fi
+          artifact="IGV_${version}_macOS-arm64_${sha:0:12}"
+          printf 'VERSION=%s\nARTIFACT=%s\n' "$version" "$artifact" >> "$GITHUB_ENV"
+          printf 'sha=%s\nartifact=%s\n' "$sha" "$artifact" >> "$GITHUB_OUTPUT"
+          printf '### Apple Silicon build\n\nSource commit: %s\n\nVersion: %s\n' \
+            "$sha" "$version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: temurin
+          architecture: aarch64
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@417ae3ccd767c252f5661f1ace9f835f9654f2b5 # v3.1.0
+        with:
+          # An arbitrary selected commit must not populate shared build caches.
+          cache-disabled: true
+
+      - name: Download and verify standalone Java runtime
+        run: |
+          test "$(uname -m)" = arm64
+          mkdir -p build/runtime
+          curl --fail --location \
+            --output build/runtime/temurin-21-jre-macos-aarch64.tar.gz \
+            'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jre_aarch64_mac_hotspot_21.0.12.1_1.tar.gz'
+          printf '%s  %s\n' \
+            dec50fc6f9fcd4fe3ae8cabf5a5fa68f6afc48841f7698e468e9aa5d54beed84 \
+            build/runtime/temurin-21-jre-macos-aarch64.tar.gz | shasum -a 256 -c -
+          tar -xzf build/runtime/temurin-21-jre-macos-aarch64.tar.gz -C build/runtime
+
+      - name: Run focused offline regression tests and package app
+        run: |
+          ./gradlew --no-daemon test \
+            -PbuildDir=build/macos-ci -Pversion="$VERSION" \
+            -PbuildNumber="$GITHUB_RUN_NUMBER" -Ptimestamp= \
+            '-PjdkBundleMac=build/runtime/jdk-21.0.12.1+1-jre/Contents/Home' \
+            --tests 'org.broad.igv.sam.AlignmentRenderer*Test' \
+            --tests org.broad.igv.sam.AlignmentTrackDamageTest \
+            --tests org.broad.igv.sam.ClippingCountsTest \
+            --tests org.broad.igv.sam.BisulfiteBaseInfoTest \
+            --tests org.broad.igv.sam.ByteSubarrayTest \
+            --tests 'org.broad.igv.sam.mods.*' \
+            --tests 'org.broad.igv.ui.action.SearchCommand*Test' \
+            createMacAppWithJavaDistZip
+
+      - name: Verify packaged app and prepare downloads
+        run: |
+          zip="build/macos-ci/distributions/IGV_MacApp_${VERSION}_WithJava.zip"
+          unzip -tq "$zip"
+          ditto -x -k "$zip" build/macos-ci/extracted
+          app="build/macos-ci/extracted/IGV_${VERSION}.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/IGV"
+          lipo "$app/Contents/MacOS/IGV" -verify_arch arm64
+          lipo "$app/Contents/jdk-21/bin/java" -verify_arch arm64
+          "$app/Contents/jdk-21/bin/java" -version
+          reported=$("$app/Contents/jdk-21/bin/java" \
+            --module-path="$app/Contents/Java/lib" \
+            @"$app/Contents/Java/igv.args" \
+            --module=org.igv/org.broad.igv.ui.Main --version)
+          printf '%s\n' "$reported"
+          [[ "$reported" == *"$VERSION"* ]]
+          mkdir -p build/macos-ci/downloads
+          cp "$zip" "build/macos-ci/downloads/$ARTIFACT.zip"
+          (
+            cd build/macos-ci/downloads
+            shasum -a 256 "$ARTIFACT.zip" > "$ARTIFACT.zip.sha256"
+          )
+          printf '\nDownload **%s** under Artifacts on this run. Unzip the artifact, then the app ZIP inside it.\n\nUnsigned, unofficial build; Apple Silicon only; Java 21 included.\n' \
+            "$ARTIFACT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.metadata.outputs.artifact }}
+          path: build/macos-ci/downloads/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macOS-test-reports
+          path: |
+            build/macos-ci/reports/tests/test/
+            build/macos-ci/test-results/test/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  release:
+    # Only this separate job gets a write token; never execute selected source here.
+    if: ${{ github.event_name == 'push' }}
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: downloads
+      - name: Publish tagged release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ needs.build.outputs.sha }}
+        shell: bash
+        run: |
+          notes="Unofficial patched IGV build for Apple Silicon Macs (arm64), with Java 21 included.
+
+          Source commit: $SOURCE_SHA
+
+          Download the app ZIP, unzip it, and drag the .app into Applications. Intel Macs are not supported.
+
+          This app is not Developer ID signed or notarized. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway only if you trust this build. Do not disable Gatekeeper globally.
+
+          A SHA-256 checksum is included. Packaging checks and focused offline regression tests passed; GUI behavior requires manual verification."
+          gh release create "$TAG" downloads/* --verify-tag \
+            --title "IGV ${TAG#v} (unofficial, Apple Silicon)" --notes "$notes"
