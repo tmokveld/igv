@@ -52,6 +52,7 @@ import java.awt.geom.AffineTransform;
 import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -305,7 +306,7 @@ public class AlignmentRenderer {
 
         final boolean leaveMargin = this.track.getDisplayMode() != Track.DisplayMode.SQUISHED;
         ThinReadBody thinReadBody = Math.max(1, rowRect.height - (leaveMargin ? 2 : 0)) == 1
-                ? ThinReadBody.create(context, rowRect.y) : null;
+                ? ThinReadBody.create(context, rowRect, overviewBatching(context, renderOptions)) : null;
 
         double origin = context.getOrigin();
         double locScale = context.getScale();
@@ -546,10 +547,35 @@ public class AlignmentRenderer {
         g.drawLine(startX, y + h / 2, endX, y + h / 2);
     }
 
+    private static boolean overviewBatching(RenderContext context, AlignmentTrack.RenderOptions options) {
+        return context.getScale() > 1 && context.getScale() < 100 &&
+                options.getColorOption() == ColorOption.NONE && !options.isShowAllBases() &&
+                !options.isQuickConsensusMode() && !options.isHideSmallIndels();
+    }
+
+    private static boolean rasterBaseStrip(Graphics2D graphics) {
+        if (!graphics.getClass().getName().equals("sun.java2d.SunGraphics2D") ||
+                !(graphics.getComposite() instanceof AlphaComposite composite) ||
+                composite.getRule() != AlphaComposite.SRC_OVER ||
+                graphics.getRenderingHint(RenderingHints.KEY_ANTIALIASING) == RenderingHints.VALUE_ANTIALIAS_ON) {
+            return false;
+        }
+        AffineTransform transform = graphics.getTransform();
+        // Integer device boundaries make image columns equivalent to fillRect.
+        // Fractional scales/translations and vector/custom graphics keep their
+        // existing per-base path (including per-block soft-clip batching).
+        return transform.getShearX() == 0 && transform.getShearY() == 0 &&
+                (transform.getScaleX() == 1 || transform.getScaleX() == 2) &&
+                (transform.getScaleY() == 1 || transform.getScaleY() == 2) &&
+                transform.getTranslateX() == Math.rint(transform.getTranslateX()) &&
+                transform.getTranslateY() == Math.rint(transform.getTranslateY());
+    }
+
     /**
      * Raster-only replacement for a normalized, square-capped one-pixel stroke.
      * Work in device pixels: a logical fillRect is not equivalent at 2x or 1.25x.
-     * The cached graphics retains the original device clip and ordered alpha blending.
+     * The cached graphics retains the original device clip. At overview zoom,
+     * coverage counts retain repeated SRC_OVER contributions from overlapping caps.
      */
     private static final class ThinReadBody {
         private static final BasicStroke DEFAULT_STROKE = new BasicStroke();
@@ -560,19 +586,34 @@ public class AlignmentRenderer {
         private final int leftInset;
         private final int top;
         private final int height;
+        private final int startX;
+        private final int width;
+        private final int[] coverage;
+        private final BaseRenderer.ColorStrip colorStrip;
 
-        private ThinReadBody(Graphics2D graphics, AffineTransform transform, int y) {
+        private ThinReadBody(Graphics2D graphics, AffineTransform transform, Rectangle row,
+                             RenderContext context, boolean batch) {
             this.graphics = graphics;
             scaleX = transform.getScaleX();
             translateX = transform.getTranslateX();
             leftInset = scaleX == 2 ? -1 : 0;
             double scaleY = transform.getScaleY();
-            int centerY = (int) Math.floor(y * scaleY + transform.getTranslateY() + 0.25);
+            int centerY = (int) Math.floor(row.y * scaleY + transform.getTranslateY() + 0.25);
             top = centerY + (scaleY == 2 ? -1 : 0);
             height = scaleY == 2 ? 2 : 1;
+            // Bound scratch by the device damage clip, not the layout rectangle:
+            // normalized stroke caps may paint outside that rectangle. With no
+            // explicit clip, retain the existing fill path rather than guess the
+            // raster's bounds.
+            Rectangle clip = graphics.getClipBounds();
+            startX = clip == null ? 0 : clip.x;
+            width = clip == null ? 0 : clip.width;
+            batch = batch && width > 0;
+            coverage = batch ? context.getReadBodyCoverage(width) : null;
+            colorStrip = batch ? context.getBaseColorStrip() : null;
         }
 
-        private static ThinReadBody create(RenderContext context, int y) {
+        private static ThinReadBody create(RenderContext context, Rectangle row, boolean batch) {
             Graphics2D source = context.getGraphics2D("ALIGNMENT");
             // Do not change SVG/vector semantics or assume a custom Graphics2D rasterizer.
             if (!source.getClass().getName().equals("sun.java2d.SunGraphics2D") ||
@@ -587,7 +628,9 @@ public class AlignmentRenderer {
             if (transform.getShearX() != 0 || transform.getShearY() != 0 ||
                     !supportedScale(transform.getScaleX()) || !supportedScale(transform.getScaleY()) ||
                     !quarterPixel(transform.getTranslateX()) || !quarterPixel(transform.getTranslateY()) ||
-                    Math.abs(y * transform.getScaleY() + transform.getTranslateY()) > DEVICE_LIMIT) {
+                    Math.abs(row.y * transform.getScaleY() + transform.getTranslateY()) > DEVICE_LIMIT ||
+                    Math.abs(row.x * transform.getScaleX() + transform.getTranslateX()) > DEVICE_LIMIT ||
+                    Math.abs(row.getMaxX() * transform.getScaleX() + transform.getTranslateX()) > DEVICE_LIMIT) {
                 return null;
             }
             Graphics2D graphics = context.getGraphics2D("THIN_READ_BODY");
@@ -596,7 +639,7 @@ public class AlignmentRenderer {
             graphics.setTransform(new AffineTransform());
             graphics.setComposite(source.getComposite());
             graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
-            return new ThinReadBody(graphics, transform, y);
+            return new ThinReadBody(graphics, transform, row, context, batch);
         }
 
         private static boolean supportedScale(double scale) {
@@ -605,6 +648,23 @@ public class AlignmentRenderer {
 
         private static boolean quarterPixel(double coordinate) {
             return Math.abs(coordinate) <= DEVICE_LIMIT && coordinate * 4 == Math.rint(coordinate * 4);
+        }
+
+        private void reset(Color color) {
+            graphics.setColor(color);
+            if (coverage != null) Arrays.fill(coverage, 0, width, 0);
+        }
+
+        private void draw() {
+            if (coverage == null) return;
+            colorStrip.reset(graphics, startX, width);
+            Color color = graphics.getColor();
+            for (int i = 0; i < width; i++) {
+                for (int layer = 0; layer < coverage[i]; layer++) {
+                    colorStrip.blendColor(startX + i, color);
+                }
+            }
+            colorStrip.draw(top, height);
         }
 
         private boolean fill(int start, int end) {
@@ -616,7 +676,13 @@ public class AlignmentRenderer {
             // even when they coincide or arrive in reverse order.
             int left = (int) Math.floor(first + 0.25) + leftInset;
             int right = (int) Math.floor(last + 0.25) + 1;
-            graphics.fillRect(left, top, right - left, height);
+            if (coverage == null) {
+                graphics.fillRect(left, top, right - left, height);
+            } else {
+                int firstColumn = Math.max(0, left - startX);
+                int lastColumn = Math.min(width, right - startX);
+                for (int i = firstColumn; i < lastColumn; i++) coverage[i]++;
+            }
             return true;
         }
     }
@@ -774,7 +840,7 @@ public class AlignmentRenderer {
         } else if (alignment.getMappingQuality() == 0 && renderOptions.isFlagZeroQualityAlignments()) {
             outlineGraphics = context.getGraphic2DForColor(OUTLINE_COLOR);
         }
-        if (thinReadBody != null) thinReadBody.graphics.setColor(gAlignment.getColor());
+        if (thinReadBody != null) thinReadBody.reset(gAlignment.getColor());
 
 
         // Compute arrow width from total length of alignment on reference
@@ -812,6 +878,12 @@ public class AlignmentRenderer {
 
             if (h == 1) {
                 if (thinReadBody == null || !thinReadBody.fill(blockPxStart, blockPxEnd)) {
+                    // Flush earlier contributions before an unsupported endpoint's
+                    // original line paint, then resume with empty coverage.
+                    if (thinReadBody != null) {
+                        thinReadBody.draw();
+                        thinReadBody.reset(gAlignment.getColor());
+                    }
                     gAlignment.drawLine(blockPxStart, y, blockPxEnd, y);
                 }
             } else {
@@ -872,6 +944,7 @@ public class AlignmentRenderer {
             }
             leftmost = false;
         }
+        if (thinReadBody != null) thinReadBody.draw();
 
         // Draw bases for an alignment block.  The bases are "overlaid" on the block with a transparency value (alpha)
         // that is proportional to the base quality score, or flow signal deviation, whichever is selected.
@@ -883,6 +956,18 @@ public class AlignmentRenderer {
                     !(colorOption == ColorOption.BISULFITE || colorOption == ColorOption.NOMESEQ); // Disable showAllBases in bisulfite mode
 
             if (renderOptions.isShowMismatches() || showAllBases) {
+                BaseRenderer.ColorStrip alignmentStrip = null;
+                if (overviewBatching(context, renderOptions) && rasterBaseStrip(gAlignment)) {
+                    Graphics2D stripGraphics = context.getGraphics2D("BASE_COLOR_STRIP");
+                    stripGraphics.setTransform(gAlignment.getTransform());
+                    stripGraphics.setClip(gAlignment.getClip());
+                    stripGraphics.setComposite(gAlignment.getComposite());
+                    alignmentStrip = context.getBaseColorStrip();
+                    // Preserve partial edge columns and the existing inclusive
+                    // right-edge test, independently of the graphics damage clip.
+                    alignmentStrip.reset(stripGraphics, rowRect.x - 1, rowRect.width + 2);
+                }
+
 
                 for (AlignmentBlock block : alignment.getAlignmentBlocks()) {
 
@@ -930,8 +1015,8 @@ public class AlignmentRenderer {
                     final boolean batchSoftClips = isSoftClip && locScale > 1 && !bisulfiteMode &&
                             gAlignment.getComposite() instanceof AlphaComposite composite &&
                             composite.getRule() == AlphaComposite.SRC_OVER;
-                    BaseRenderer.ColorStrip colorStrip = null;
-                    if (batchSoftClips && s < e) {
+                    BaseRenderer.ColorStrip colorStrip = alignmentStrip;
+                    if (colorStrip == null && batchSoftClips && s < e) {
                         int firstPixel = Math.max(rowRect.x - 1, (int) ((s - bpStart) / locScale));
                         int lastPixel = Math.min((int) rowRect.getMaxX(), (int) ((e - 1.0 - bpStart) / locScale));
                         if (firstPixel > lastPixel) continue;
@@ -994,9 +1079,12 @@ public class AlignmentRenderer {
                             }
                         }
                     }
-                    if (colorStrip != null) {
+                    if (colorStrip != null && alignmentStrip == null) {
                         colorStrip.draw(pY, dY - (leaveMargin ? 2 : 0));
                     }
+                }
+                if (alignmentStrip != null) {
+                    alignmentStrip.draw(rowRect.y, h);
                 }
             }
         }

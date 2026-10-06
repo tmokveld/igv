@@ -27,9 +27,9 @@ import java.util.Map;
 public class BaseRenderer {
 
     /**
-     * Reusable scratch for ordered SRC_OVER base overlays. Supply columns in
-     * increasing order, with all layers for a column together. The dedicated
-     * graphics' extra alpha is applied to each base, not to the finished strip.
+     * Reusable scratch for ordered SRC_OVER overlays. Columns may be revisited;
+     * each retains full-precision premultiplied channels until the strip is drawn.
+     * The dedicated graphics' extra alpha applies to every layer, not the strip.
      */
     public static final class ColorStrip {
 
@@ -42,6 +42,7 @@ public class BaseRenderer {
         private BufferedImage image;
         private int[] pixels;
         private int column;
+        private double[] channels;
         private double extraAlpha;
         private double alpha;
         private double red;
@@ -57,6 +58,11 @@ public class BaseRenderer {
             column = -1;
             alpha = red = green = blue = 0;
             extraAlpha = ((AlphaComposite) graphics.getComposite()).getAlpha();
+            if (channels == null || channels.length < width * 4) {
+                channels = new double[width * 4];
+            } else {
+                Arrays.fill(channels, 0, width * 4, 0);
+            }
             vector = graphics instanceof SVGGraphics2D;
 
             if (vector) {
@@ -84,7 +90,11 @@ public class BaseRenderer {
             if (index != column) {
                 finishColumn();
                 column = index;
-                alpha = red = green = blue = 0;
+                int offset = index * 4;
+                alpha = channels[offset];
+                red = channels[offset + 1];
+                green = channels[offset + 2];
+                blue = channels[offset + 3];
             }
             double remaining = 1 - sourceAlpha;
             red = color.getRed() * sourceAlpha + red * remaining;
@@ -95,6 +105,11 @@ public class BaseRenderer {
 
         private void finishColumn() {
             if (column < 0) return;
+            int offset = column * 4;
+            channels[offset] = alpha;
+            channels[offset + 1] = red;
+            channels[offset + 2] = green;
+            channels[offset + 3] = blue;
             // Keep premultiplied channels at full precision until the column is
             // complete. Rounding once can differ slightly from repeated Java2D fills.
             pixels[column] = ((int) Math.round(alpha * 255) << 24) |

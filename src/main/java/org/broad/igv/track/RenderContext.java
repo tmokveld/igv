@@ -53,6 +53,7 @@ public class RenderContext {
     private ReferenceFrame referenceFrame;
     private JComponent panel;
     private BaseRenderer.ColorStrip baseColorStrip;
+    private int[] readBodyCoverage;
     public Rectangle visibleRect;
     public boolean multiframe = false;
     public int expandedInsertionPosition = -1;
@@ -91,14 +92,25 @@ public class RenderContext {
     }
 
     /**
-     * Scratch for sequential base overlays in this paint only. Copied contexts
-     * get their own buffer; callers reset it before drawing each block.
+     * Scratch for sequential body/base overlays in this paint only. Copied
+     * contexts own independent buffers; reset before each alignment or block.
      */
     public BaseRenderer.ColorStrip getBaseColorStrip() {
         if (baseColorStrip == null) {
             baseColorStrip = new BaseRenderer.ColorStrip();
         }
         return baseColorStrip;
+    }
+
+    /**
+     * Device-column coverage scratch, reset by the thin-body renderer for each
+     * alignment. It is never shared with copied contexts or retained across paints.
+     */
+    public int[] getReadBodyCoverage(int width) {
+        if (readBodyCoverage == null || readBodyCoverage.length < width) {
+            readBodyCoverage = new int[width];
+        }
+        return readBodyCoverage;
     }
 
     public void clearGraphicsCache() {
@@ -169,6 +181,7 @@ public class RenderContext {
         }
         graphicCache.clear();
         baseColorStrip = null;
+        readBodyCoverage = null;
     }
 
 }
