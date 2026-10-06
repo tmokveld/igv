@@ -40,7 +40,6 @@ public class AlignmentRendererClippingTest {
     private IGVPreferences preferences;
     private final Map<String, String> previousPreferences = new LinkedHashMap<>();
     private HashMap<Character, Color> previousNucleotideColors;
-    private Map<String, Color> previousShadedColors;
     private AlignmentTrack track;
     private SAMFileHeader header;
 
@@ -66,10 +65,6 @@ public class AlignmentRendererClippingTest {
         AlignmentRenderer.nucleotideColors.put('C', Color.BLUE);
         AlignmentRenderer.nucleotideColors.put('G', Color.ORANGE);
         AlignmentRenderer.nucleotideColors.put('T', Color.RED);
-        synchronized (BaseRenderer.shadedColorCache) {
-            previousShadedColors = new HashMap<>(BaseRenderer.shadedColorCache);
-            BaseRenderer.shadedColorCache.clear();
-        }
 
         header = new SAMFileHeader();
         header.addSequence(new SAMSequenceRecord("chr16", 50000));
@@ -101,12 +96,6 @@ public class AlignmentRendererClippingTest {
         }
         if (preferences != null) previousPreferences.forEach(preferences::put);
         if (previousNucleotideColors != null) AlignmentRenderer.nucleotideColors = previousNucleotideColors;
-        if (previousShadedColors != null) {
-            synchronized (BaseRenderer.shadedColorCache) {
-                BaseRenderer.shadedColorCache.clear();
-                BaseRenderer.shadedColorCache.putAll(previousShadedColors);
-            }
-        }
         GenomeManager.getInstance().setCurrentGenomeForTest(previousGenome);
         Globals.setHeadless(previousHeadless);
     }

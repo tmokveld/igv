@@ -60,7 +60,7 @@ public class SequenceRenderer {
 
     private static final int AMINO_ACID_RESOLUTION = 5;
 
-    public static Map<Character, Color> nucleotideColors;
+    public static volatile Map<Character, Color> nucleotideColors;
 
     public static Map<Character, Color> getNucleotideColors() {
         if (nucleotideColors == null) setNucleotideColors();
@@ -71,7 +71,7 @@ public class SequenceRenderer {
 
         IGVPreferences prefs = PreferencesManager.getPreferences();
 
-        nucleotideColors = new HashMap();
+        Map<Character, Color> colors = new HashMap<>();
 
         Color a = ColorUtilities.stringToColor(prefs.get(COLOR_A), new Color(0, 150, 0));
         Color c = ColorUtilities.stringToColor(prefs.get(COLOR_C), Color.blue);
@@ -79,17 +79,18 @@ public class SequenceRenderer {
         Color g = ColorUtilities.stringToColor(prefs.get(COLOR_G), new Color(209, 113, 5));
         Color n = ColorUtilities.stringToColor(prefs.get(COLOR_N), Color.gray);
 
-        nucleotideColors.put('A', a);
-        nucleotideColors.put('a', a);
-        nucleotideColors.put('C', c);
-        nucleotideColors.put('c', c);
-        nucleotideColors.put('T', t);
-        nucleotideColors.put('t', t);
-        nucleotideColors.put('G', g);
-        nucleotideColors.put('g', g);
-        nucleotideColors.put('N', n);
-        nucleotideColors.put('n', n);
-        nucleotideColors.put('-', Color.lightGray);
+        colors.put('A', a);
+        colors.put('a', a);
+        colors.put('C', c);
+        colors.put('c', c);
+        colors.put('T', t);
+        colors.put('t', t);
+        colors.put('G', g);
+        colors.put('g', g);
+        colors.put('N', n);
+        colors.put('n', n);
+        colors.put('-', Color.lightGray);
+        nucleotideColors = colors;
 
     }
 

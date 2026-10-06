@@ -15,7 +15,7 @@ import java.awt.geom.Rectangle2D;
 import java.awt.image.BufferedImage;
 import java.awt.image.DataBufferInt;
 import java.util.Arrays;
-import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,6 +25,72 @@ import java.util.Map;
  */
 
 public class BaseRenderer {
+
+    /**
+     * Immutable palette/options snapshot. Resolve once per row (or insertion
+     * paint), never per block/base. Source identity matters for unshaded and
+     * high-quality returns; shaded colors deliberately share by RGB alone.
+     */
+    static final class PaletteColors {
+        private final Map<Character, Color> palette;
+        final boolean shade;
+        final int minQ;
+        final int maxQ;
+        private final Color[] originals = new Color[256];
+        private final Color[][] shaded;
+
+        PaletteColors(Map<Character, Color> palette, boolean shade, int minQ, int maxQ) {
+            this.palette = new HashMap<>(palette);
+            this.shade = shade;
+            this.minQ = minQ;
+            this.maxQ = maxQ;
+            shaded = shade ? new Color[256][] : null;
+            int[] buckets = shade ? new int[256] : null;
+            if (shade) {
+                for (int i = 0; i < 256; i++) buckets[i] = qualityBucket((byte) i, minQ, maxQ);
+            }
+            Map<Color, Color[]> byIdentity = shade ? new IdentityHashMap<>() : null;
+            for (int i = 0; i < 256; i++) {
+                // Preserve the renderer's signed-byte-to-char conversion.
+                Color color = this.palette.get((char) (byte) i);
+                if (color == null) color = Color.BLACK;
+                originals[i] = color;
+                if (shade) {
+                    Color[] qualities = byIdentity.get(color);
+                    if (qualities == null) {
+                        qualities = new Color[256];
+                        Color[] alphas = new Color[11];
+                        for (int q = 0; q < 256; q++) {
+                            int bucket = buckets[q];
+                            if (bucket < 0) {
+                                qualities[q] = color;
+                            } else {
+                                if (alphas[bucket] == null) alphas[bucket] = shadedColor(color, bucket);
+                                qualities[q] = alphas[bucket];
+                            }
+                        }
+                        byIdentity.put(color, qualities);
+                    }
+                    shaded[i] = qualities;
+                }
+            }
+        }
+
+        boolean matches(Map<Character, Color> palette, boolean shade, int minQ, int maxQ) {
+            if (this.shade != shade || this.minQ != minQ || this.maxQ != maxQ ||
+                    this.palette.size() != palette.size()) return false;
+            for (Map.Entry<Character, Color> entry : this.palette.entrySet()) {
+                if (!palette.containsKey(entry.getKey()) || palette.get(entry.getKey()) != entry.getValue()) return false;
+            }
+            return true;
+        }
+
+        Color getColor(byte base, byte quality) {
+            return shade ? shaded[base & 0xff][quality & 0xff] : originals[base & 0xff];
+        }
+    }
+
+    private static volatile PaletteColors insertionPaletteColors;
 
     /**
      * Reusable scratch for ordered SRC_OVER overlays. Columns may be revisited;
@@ -209,6 +275,15 @@ public class BaseRenderer {
                 g.setFont(f);
             }
             AlignmentTrack.ColorOption colorOption = renderOptions.getColorOption();
+            boolean shadeBases = renderOptions.getShadeBasesOption();
+            int minQ = renderOptions.getBaseQualityMin();
+            int maxQ = renderOptions.getBaseQualityMax();
+            Map<Character, Color> palette = SequenceRenderer.getNucleotideColors();
+            PaletteColors colors = insertionPaletteColors;
+            if (colors == null || !colors.matches(palette, shadeBases, minQ, maxQ)) {
+                colors = new PaletteColors(palette, shadeBases, minQ, maxQ);
+                insertionPaletteColors = colors;
+            }
 
             for (Alignment alignment : alignments) {
 
@@ -255,16 +330,17 @@ public class BaseRenderer {
                                 colorOption.isSMRTKinetics()) {
                             color = Color.GRAY;
                         } else {
-                            //color = nucleotideColors.get(c);
-                            color = SequenceRenderer.nucleotideColors.get(c);
+                            byte quality = shadeBases && p >= padding ? insertion.getQuality(p - padding) : (byte) 126;
+                            // Padding is never quality-shaded, even with unusual thresholds.
+                            color = p < padding ? colors.originals[(byte) c & 0xff] : colors.getColor((byte) c, quality);
                         }
                         if (color == null) {
                             color = Color.black;
                         }
 
-                        if (renderOptions.getShadeBasesOption() && p >= padding) {
-                            byte qual = p < padding ? (byte) 126 : insertion.getQuality(p - padding);
-                            color = BaseRenderer.getShadedColor(color, qual, renderOptions.getBaseQualityMin(), renderOptions.getBaseQualityMax());
+                        if (shadeBases && p >= padding && (colorOption.isBaseMod() || colorOption.isSMRTKinetics())) {
+                            byte qual = insertion.getQuality(p - padding);
+                            color = BaseRenderer.getShadedColor(color, qual, minQ, maxQ);
                         }
 
                         if (dX < 8) {
@@ -292,8 +368,12 @@ public class BaseRenderer {
     }
 
     public static Color getShadedColor(Color color, byte qual, int minQ, int maxQ) {
+        int bucket = qualityBucket(qual, minQ, maxQ);
+        return bucket < 0 ? color : shadedColor(color, bucket);
+    }
 
-        if (qual >= maxQ) return color;
+    private static int qualityBucket(byte qual, int minQ, int maxQ) {
+        if (qual >= maxQ) return -1;
 
         float alpha;
         if (qual < minQ) {
@@ -301,18 +381,24 @@ public class BaseRenderer {
         } else {
             alpha = Math.max(0.2f, Math.min(1.0f, 0.1f + 0.9f * (qual - minQ) / (maxQ - minQ)));
         }
-
-        // Round alpha to nearest 0.1
-        alpha = ((int) (alpha * 10 + 0.5f)) / 10.0f;
-        String key = ColorUtilities.colorToString(color) + "_" + alpha;
-        Color c = shadedColorCache.get(key);
-        if (c == null) {
-            c = ColorUtilities.modifyAlpha(color, (int) (alpha * 255));
-            shadedColorCache.put(key, c);
-        }
-        return c;
+        return (int) (alpha * 10 + 0.5f);
     }
 
-    static Map<String, Color> shadedColorCache = Collections.synchronizedMap(new HashMap<>());
+    // Bounded, direct-mapped RGB/tenth cache for arbitrary-color callers.
+    // Palette lookups never acquire this lock. Collisions only evict a value;
+    // neither source alpha nor thresholds belong in the shaded equivalence key.
+    private static final Color[] shadedColors = new Color[256 * 11];
+
+    private static synchronized Color shadedColor(Color color, int bucket) {
+        int rgb = (color.getRed() << 16) | (color.getGreen() << 8) | color.getBlue();
+        int slot = ((rgb ^ (rgb >>> 12)) & 0xff) * 11 + bucket;
+        Color shaded = shadedColors[slot];
+        if (shaded == null || (shaded.getRGB() & 0xffffff) != rgb) {
+            float alpha = bucket / 10.0f;
+            shaded = ColorUtilities.modifyAlpha(color, (int) (alpha * 255));
+            shadedColors[slot] = shaded;
+        }
+        return shaded;
+    }
 
 }

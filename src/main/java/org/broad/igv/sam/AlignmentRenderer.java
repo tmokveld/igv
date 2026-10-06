@@ -56,6 +56,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import static org.broad.igv.prefs.Constants.*;
 
@@ -121,7 +122,8 @@ public class AlignmentRenderer {
     private static ColorTable zmwColors;
     private static Map<String, ColorTable> tagValueColors;
     private static ColorTable defaultTagColors;
-    public static HashMap<Character, Color> nucleotideColors;
+    public static volatile HashMap<Character, Color> nucleotideColors;
+    private static String nucleotideA, nucleotideC, nucleotideT, nucleotideG, nucleotideN;
 
     final private static ColorByTagValueList colorByTagValueList = new ColorByTagValueList();
     final private static FlowIndelRendering flowIndelRendering = new FlowIndelRendering();
@@ -224,40 +226,55 @@ public class AlignmentRenderer {
         typeToColorMap.put(AlignmentTrack.OrientationType.RR, RR_COLOR);
     }
 
-    private static void setNucleotideColors() {
-
+    private static synchronized HashMap<Character, Color> getNucleotideColors() {
         IGVPreferences prefs = PreferencesManager.getPreferences();
+        String aPreference = prefs.get(SAM_COLOR_A);
+        String cPreference = prefs.get(SAM_COLOR_C);
+        String tPreference = prefs.get(SAM_COLOR_T);
+        String gPreference = prefs.get(SAM_COLOR_G);
+        String nPreference = prefs.get(SAM_COLOR_N);
+        if (nucleotideColors != null &&
+                Objects.equals(nucleotideA, aPreference) && Objects.equals(nucleotideC, cPreference) &&
+                Objects.equals(nucleotideT, tPreference) && Objects.equals(nucleotideG, gPreference) &&
+                Objects.equals(nucleotideN, nPreference)) return nucleotideColors;
 
-        nucleotideColors = new HashMap<>();
-
-        Color a = ColorUtilities.stringToColor(prefs.get(SAM_COLOR_A), Color.green);
-        Color c = ColorUtilities.stringToColor(prefs.get(SAM_COLOR_C), Color.blue);
-        Color t = ColorUtilities.stringToColor(prefs.get(SAM_COLOR_T), Color.red);
-        Color g = ColorUtilities.stringToColor(prefs.get(SAM_COLOR_G), new Color(209, 113, 5));
-        Color n = ColorUtilities.stringToColor(prefs.get(SAM_COLOR_N), new Color(64, 64, 64));
-
-        nucleotideColors.put('A', a);
-        nucleotideColors.put('a', a);
-        nucleotideColors.put('C', c);
-        nucleotideColors.put('c', c);
-        nucleotideColors.put('T', t);
-        nucleotideColors.put('t', t);
-        nucleotideColors.put('G', g);
-        nucleotideColors.put('g', g);
-        nucleotideColors.put('N', n);
-        nucleotideColors.put('n', n);
-        nucleotideColors.put('-', Color.lightGray);
+        Color a = ColorUtilities.stringToColor(aPreference, Color.green);
+        Color c = ColorUtilities.stringToColor(cPreference, Color.blue);
+        Color t = ColorUtilities.stringToColor(tPreference, Color.red);
+        Color g = ColorUtilities.stringToColor(gPreference, new Color(209, 113, 5));
+        Color n = ColorUtilities.stringToColor(nPreference, new Color(64, 64, 64));
+        HashMap<Character, Color> colors = new HashMap<>();
+        colors.put('A', a);
+        colors.put('a', a);
+        colors.put('C', c);
+        colors.put('c', c);
+        colors.put('T', t);
+        colors.put('t', t);
+        colors.put('G', g);
+        colors.put('g', g);
+        colors.put('N', n);
+        colors.put('n', n);
+        colors.put('-', Color.lightGray);
+        nucleotideA = aPreference;
+        nucleotideC = cPreference;
+        nucleotideT = tPreference;
+        nucleotideG = gPreference;
+        nucleotideN = nPreference;
+        // Publish only a fully populated palette. Existing paints retain their snapshot.
+        nucleotideColors = colors;
+        return colors;
 
     }
 
     static {
         initializeTagTypes();
-        setNucleotideColors();
+        getNucleotideColors();
         initializeTagColors();
     }
 
 
     AlignmentTrack track;
+    private volatile BaseRenderer.PaletteColors baseColors;
 
     public AlignmentRenderer(AlignmentTrack track) {
         this.track = track;
@@ -303,6 +320,15 @@ public class AlignmentRenderer {
     ) {
 
         initializeGraphics(context);
+        HashMap<Character, Color> palette = getNucleotideColors();
+        boolean shadeBases = renderOptions.getShadeBasesOption();
+        int minQ = renderOptions.getBaseQualityMin();
+        int maxQ = renderOptions.getBaseQualityMax();
+        BaseRenderer.PaletteColors colors = baseColors;
+        if (colors == null || !colors.matches(palette, shadeBases, minQ, maxQ)) {
+            colors = new BaseRenderer.PaletteColors(palette, shadeBases, minQ, maxQ);
+            baseColors = colors;
+        }
 
         final boolean leaveMargin = this.track.getDisplayMode() != Track.DisplayMode.SQUISHED;
         ThinReadBody thinReadBody = Math.max(1, rowRect.height - (leaveMargin ? 2 : 0)) == 1
@@ -369,11 +395,11 @@ public class AlignmentRenderer {
                     g.fillRect((int) pixelStart, y, w, h);
                     lastPixelDrawn = (int) pixelStart + w;
                 } else if (alignment instanceof PairedAlignment) {
-                    drawPairedAlignment((PairedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts, thinReadBody);
+                    drawPairedAlignment((PairedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts, thinReadBody, colors);
                 } else if (alignment instanceof LinkedAlignment) {
-                    drawLinkedAlignment((LinkedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts, thinReadBody);
+                    drawLinkedAlignment((LinkedAlignment) alignment, rowRect, context, renderOptions, leaveMargin, alignmentCounts, thinReadBody, colors);
                 } else {
-                    drawAlignment(alignment, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, false, thinReadBody);
+                    drawAlignment(alignment, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, false, thinReadBody, colors);
                 }
             }
 
@@ -399,7 +425,7 @@ public class AlignmentRenderer {
 
     private void drawLinkedAlignment(LinkedAlignment alignment, Rectangle rowRect, RenderContext context,
                                      AlignmentTrack.RenderOptions renderOptions, boolean leaveMargin,
-                                     AlignmentCounts alignmentCounts, ThinReadBody thinReadBody) {
+                                     AlignmentCounts alignmentCounts, ThinReadBody thinReadBody, BaseRenderer.PaletteColors colors) {
 
         double origin = context.getOrigin();
         double locScale = context.getScale();
@@ -430,7 +456,7 @@ public class AlignmentRenderer {
                     if (mixedStrand) alignmentColor = posStrandColor;
                     overlapped = i < barcodedAlignments.size() - 1 && al.getAlignmentEnd() > barcodedAlignments.get(i + 1).getAlignmentStart();
                 }
-                drawAlignment(al, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody);
+                drawAlignment(al, rowRect, context, alignmentColor, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody, colors);
             }
         }
     }
@@ -503,7 +529,7 @@ public class AlignmentRenderer {
             AlignmentTrack.RenderOptions renderOptions,
             boolean leaveMargin,
             AlignmentCounts alignmentCounts,
-            ThinReadBody thinReadBody) {
+            ThinReadBody thinReadBody, BaseRenderer.PaletteColors colors) {
 
         double locScale = context.getScale();
 
@@ -516,7 +542,7 @@ public class AlignmentRenderer {
         Graphics2D g = context.getGraphics2D("ALIGNMENT");
         g.setColor(alignmentColor1);
 
-        drawAlignment(pair.firstAlignment, rowRect, context, alignmentColor1, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody);
+        drawAlignment(pair.firstAlignment, rowRect, context, alignmentColor1, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody, colors);
 
         //If the paired alignment is in memory, we draw it.
         //However, we get the coordinates from the first alignment
@@ -526,7 +552,7 @@ public class AlignmentRenderer {
             }
             g.setColor(alignmentColor2);
 
-            drawAlignment(pair.secondAlignment, rowRect, context, alignmentColor2, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody);
+            drawAlignment(pair.secondAlignment, rowRect, context, alignmentColor2, renderOptions, leaveMargin, alignmentCounts, overlapped, thinReadBody, colors);
         } else {
             return;
         }
@@ -701,7 +727,7 @@ public class AlignmentRenderer {
             boolean leaveMargin,
             AlignmentCounts alignmentCounts,
             boolean overlapped,
-            ThinReadBody thinReadBody) {
+            ThinReadBody thinReadBody, BaseRenderer.PaletteColors colors) {
 
         AlignmentBlock[] blocks = alignment.getAlignmentBlocks();
 
@@ -1052,15 +1078,16 @@ public class AlignmentRenderer {
                                     colorOption.isSMRTKinetics()) {
                                 color = Color.GRAY;
                             } else {
-                                color = nucleotideColors.get(c);
+                                byte quality = colors.shade ? block.getQuality(idx) : 0;
+                                color = colors.getColor((byte) c, quality);
                             }
                             if (color == null) {
                                 color = Color.black;
                             }
 
-                            if (renderOptions.getShadeBasesOption()) {
+                            if (colors.shade && (bisulfiteMode || colorOption.isBaseMod() || colorOption.isSMRTKinetics())) {
                                 byte qual = block.getQuality(idx);
-                                color = BaseRenderer.getShadedColor(color, qual, renderOptions.getBaseQualityMin(), renderOptions.getBaseQualityMax());
+                                color = BaseRenderer.getShadedColor(color, qual, colors.minQ, colors.maxQ);
                             }
 
                             BisulfiteBaseInfo.DisplayStatus bisstatus = (bisinfo == null) ? null : bisinfo.getDisplayStatus(idx);

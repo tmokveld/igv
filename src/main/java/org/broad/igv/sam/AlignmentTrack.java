@@ -1303,8 +1303,6 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
         private Integer smallIndelThreshold;
         private BaseModficationFilter basemodFilter;
         private Float basemodThreshold;
-        private int baseQualityMin;
-        private int baseQualityMax;
 
         private Integer minJunctionCoverage;
 
@@ -1316,9 +1314,6 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
             this.track = track;
             peStats = new HashMap<>();
 
-            // Set some constants -- for efficiency
-            this.baseQualityMin = track == null ? 5 : track.getPreferences().getAsInt(SAM_BASE_QUALITY_MIN);
-            this.baseQualityMax = track == null ? 20 : track.getPreferences().getAsInt(SAM_BASE_QUALITY_MAX);
         }
 
         IGVPreferences getPreferences() {
@@ -1334,11 +1329,11 @@ public class AlignmentTrack extends AbstractTrack implements IGVEventObserver {
         }
 
         public int getBaseQualityMin() {
-            return baseQualityMin;
+            return track == null ? 5 : track.getPreferences().getAsInt(SAM_BASE_QUALITY_MIN);
         }
 
         public int getBaseQualityMax() {
-            return baseQualityMax;
+            return track == null ? 20 : track.getPreferences().getAsInt(SAM_BASE_QUALITY_MAX);
         }
 
         void setShowAllBases(boolean showAllBases) {
