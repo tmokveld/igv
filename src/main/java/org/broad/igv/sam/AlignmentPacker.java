@@ -580,22 +580,23 @@ public class AlignmentPacker {
     }
 
     /**
-     * Dense array implementation of BucketCollection.  Assumption is all or nearly all the genome region is covered
-     * with reads.
+     * Dense array implementation of BucketCollection with an index of occupied positions.
      */
     static class DenseBucketCollection implements BucketCollection {
 
         Range range;
-        int lastBucketNumber = -1;
+        final BitSet occupiedBuckets;
         final PriorityQueue[] bucketArray;
 
         DenseBucketCollection(int bucketCount, Range range) {
             this.bucketArray = new PriorityQueue[bucketCount];
+            this.occupiedBuckets = new BitSet(bucketCount);
             this.range = range;
         }
 
         public void set(int idx, PriorityQueue<Alignment> bucket) {
             bucketArray[idx] = bucket;
+            occupiedBuckets.set(idx);
         }
 
         public PriorityQueue<Alignment> get(int idx) {
@@ -611,7 +612,7 @@ public class AlignmentPacker {
         }
 
         /**
-         * Return the next occupied bucket after bucketNumber
+         * Return the next occupied bucket at or after bucketNumber.
          *
          * @param bucketNumber
          * @param emptyBuckets ignored
@@ -619,26 +620,15 @@ public class AlignmentPacker {
          */
         public PriorityQueue<Alignment> getNextBucket(int bucketNumber, Collection<Integer> emptyBuckets) {
 
-            if (bucketNumber == lastBucketNumber) {
-                // TODO -- detect inf loop here
-            }
-
-            PriorityQueue<Alignment> bucket = null;
-            while (bucketNumber < bucketArray.length) {
-
-                if (bucketNumber < 0) {
-                    log.warn("Negative bucket number: " + bucketNumber);
+            for (int idx = occupiedBuckets.nextSetBit(bucketNumber); idx >= 0;
+                 idx = occupiedBuckets.nextSetBit(idx + 1)) {
+                PriorityQueue<Alignment> bucket = bucketArray[idx];
+                if (!bucket.isEmpty()) {
+                    return bucket;
                 }
-
-                bucket = bucketArray[bucketNumber];
-                if (bucket != null) {
-                    if (bucket.isEmpty()) {
-                        bucketArray[bucketNumber] = null;
-                    } else {
-                        return bucket;
-                    }
-                }
-                bucketNumber++;
+                // Queues are drained by the packer; discard empty positions lazily.
+                occupiedBuckets.clear(idx);
+                bucketArray[idx] = null;
             }
             return null;
         }
