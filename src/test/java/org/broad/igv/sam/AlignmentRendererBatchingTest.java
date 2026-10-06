@@ -20,6 +20,7 @@ import java.awt.*;
 import java.awt.geom.Ellipse2D;
 import java.awt.image.BufferedImage;
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -327,6 +328,68 @@ public class AlignmentRendererBatchingTest {
             } finally {
                 copy.dispose();
                 copy.getGraphics().dispose();
+            }
+        }
+    }
+
+    @Test
+    public void referenceTileHitsAndMissesPreserveOrdinaryAndDetailedPixelsAcrossTheBoundary() throws Exception {
+        assertReferenceTileRendering(List.of(AlignmentTrack.ColorOption.NONE));
+    }
+
+    @Test
+    public void referenceTileHitsAndMissesPreserveWholeBlockSpecializedContext() throws Exception {
+        assertReferenceTileRendering(List.of(AlignmentTrack.ColorOption.BISULFITE,
+                AlignmentTrack.ColorOption.NOMESEQ, AlignmentTrack.ColorOption.BASE_MODIFICATION,
+                AlignmentTrack.ColorOption.BASE_MODIFICATION_2COLOR, AlignmentTrack.ColorOption.SMRT_CCS_FWD_IPD));
+    }
+
+    private void assertReferenceTileRendering(List<AlignmentTrack.ColorOption> colorOptions) throws Exception {
+        byte[] sequence = new byte[2_000_000];
+        Arrays.fill(sequence, (byte) 'A');
+        byte[] context = pattern("ACGCGTNRYS", 80).getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        System.arraycopy(context, 0, sequence, 999_960, context.length);
+        InMemorySequence directReference = new InMemorySequence("chr16", sequence);
+        GenomeConfig config = new GenomeConfig();
+        config.setId("reference-tile-raster-test");
+        config.setName("reference-tile-raster-test");
+        config.setSequence(directReference);
+        Genome cachedGenome = new Genome(config);
+        // Independent API seam: the expected renderer bypasses SequenceWrapper entirely.
+        Genome directGenome = new Genome(config) {
+            @Override
+            public byte[] getSequence(String chr, int start, int end) {
+                return directReference.getSequence(getCanonicalChrName(chr), start, Math.min(end, sequence.length));
+            }
+        };
+        header = new SAMFileHeader();
+        header.addSequence(new SAMSequenceRecord("chr16", sequence.length));
+        List<Alignment> reads = new ArrayList<>();
+        for (int start : new int[]{999_980, 999_994, 1_000_003}) {
+            SAMRecord record = record("tile-" + start, start, "6S12M6S", pattern("TCG=AC", 24));
+            record.setAttribute("MM", "C+m,0,0,0;");
+            record.setAttribute("ML", new byte[]{(byte) 255, (byte) 128, (byte) 64});
+            record.setAttribute("fi", new short[24]);
+            reads.add(new SAMAlignment(record));
+        }
+        for (Track.DisplayMode mode : List.of(Track.DisplayMode.EXPANDED, Track.DisplayMode.SQUISHED)) {
+            track.setDisplayMode(mode);
+            Rectangle row = new Rectangle(0, 2, WIDTH, mode == Track.DisplayMode.SQUISHED ? 1 : 6);
+            for (AlignmentTrack.ColorOption colorOption : colorOptions) {
+                track.getRenderOptions().setColorOption(colorOption);
+                for (double scale : new double[]{0.1, 0.5, 1, 4}) {
+                    ReferenceFrame frame = frame(999_972.25, scale);
+                    for (int paint = 0; paint < 2; paint++) {
+                        try (Raster expected = new Raster(frame, g -> g.scale(2, 2));
+                             Raster actual = new Raster(frame, g -> g.scale(2, 2))) {
+                            GenomeManager.getInstance().setCurrentGenomeForTest(directGenome);
+                            render(reads, expected.context, row);
+                            GenomeManager.getInstance().setCurrentGenomeForTest(cachedGenome);
+                            render(reads, actual.context, row);
+                            assertPixels(expected.image, actual.image, 0);
+                        }
+                    }
+                }
             }
         }
     }

@@ -37,33 +37,36 @@ import org.broad.igv.util.ObjectCache;
 import java.util.Hashtable;
 import java.util.List;
 
+/*
+ * Independent pre-patch oracle, copied from
+ * profiling/results/reference-retrieval-20261006-6964c480/SequenceWrapper.pre-patch.java.
+ * Original SHA-256: 97d570c35fe1a3c6a672349b6d53769104aa0072db3851f1db46268ecb7196f4.
+ * Only the enclosing class, constructor and logger self-reference are renamed;
+ * algorithms, including historical edge behavior, are deliberately unchanged.
+ */
+
 /**
  * A wrapper class that provides caching for on-disk, queried, and web-service Sequence implementations.
  *
  * @author jrobinso
  */
-public class SequenceWrapper implements Sequence  {
+class PrePatchSequenceWrapper implements Sequence  {
 
-    private static Logger log = LogManager.getLogger(SequenceWrapper.class);
-    private static volatile boolean cacheSequences = true;
-    private static volatile int tileSize = 1000000;
+    private static Logger log = LogManager.getLogger(PrePatchSequenceWrapper.class);
+    private static boolean cacheSequences = true;
+    private static int tileSize = 1000000;
 
-    private final Sequence sequence;
-    // Retain ObjectCache's overall bound, insertion-order eviction and soft references.
-    private final ObjectCache<TileKey, SequenceTile> sequenceCache = new ObjectCache<>(50);
-    // Only this probe is mutable; it is never inserted. All cache access holds this wrapper's monitor.
-    private final TileKey lookupKey = new TileKey(null, 0);
-    private int cacheTileSize = tileSize;
+    private Sequence sequence;
+    private ObjectCache<String, SequenceTile> sequenceCache = new ObjectCache<String, SequenceTile>(50);
 
-    public SequenceWrapper(Sequence sequence) {
+    public PrePatchSequenceWrapper(Sequence sequence) {
         this.sequence = sequence;
     }
 
 
-    public synchronized byte getBase(String chr, int position) {
+    public byte getBase(String chr, int position) {
         if (cacheSequences) {
-            ensureTileSize();
-            int tileNo = position / cacheTileSize;
+            int tileNo = position / tileSize;
 
             // Get first chunk
             SequenceTile tile = getSequenceTile(chr, tileNo);
@@ -111,28 +114,18 @@ public class SequenceWrapper implements Sequence  {
      * @param end
      * @return
      */
-    public synchronized byte[] getSequence(String chr, int start, int end) {
+    public byte[] getSequence(String chr, int start, int end) {
 
         if (cacheSequences) {
-            ensureTileSize();
             byte[] seqbytes = new byte[end - start];
 
-            int startTile = start / cacheTileSize;
-            // Preserve fetching the following tile at an exact end boundary, including empty ranges.
-            int endTile = end / cacheTileSize;
+            int startTile = start / tileSize;
+            int endTile = end / tileSize;
 
-            SequenceTile[] tiles = null;
-            SequenceTile tile;
-            if (startTile == endTile) {
-                tile = findCachedTile(chr, startTile);
-                if (tile == null) {
-                    // getBase's loader retains null bytes; this loader instead pads missing data with zeroes.
-                    tile = loadTiles(chr, startTile, null, startTile, endTile);
-                }
-            } else {
-                tiles = getSequenceTiles(chr, startTile, endTile);
-                tile = tiles[0];
-            }
+            SequenceTile[] tiles = getSequenceTiles(chr, startTile, endTile);
+
+            // Get first chunk
+            SequenceTile tile = tiles[0];
             if (tile == null) {
                 return null;   // Can this ever happen?
             }
@@ -176,11 +169,12 @@ public class SequenceWrapper implements Sequence  {
 
 
     private SequenceTile getSequenceTile(String chr, int tileNo) {
-        SequenceTile tile = findCachedTile(chr, tileNo);
+        String key = getKey(chr, tileNo);
+        SequenceTile tile = sequenceCache.get(key);
 
         if (tile == null) {
-            int start = tileNo * cacheTileSize;
-            int end = start + cacheTileSize; // <=  UCSC coordinate conventions (end base not inclusive)
+            int start = tileNo * tileSize;
+            int end = start + tileSize; // <=  UCSC coordinate conventions (end base not inclusive)
 
             if (end <= start) {
                 return null;
@@ -188,7 +182,7 @@ public class SequenceWrapper implements Sequence  {
 
             byte[] seq = sequence.getSequence(chr, start, end);
             tile = new SequenceTile(start, seq);
-            sequenceCache.put(new TileKey(chr, tileNo), tile);
+            sequenceCache.put(key, tile);
         }
 
         return tile;
@@ -202,7 +196,8 @@ public class SequenceWrapper implements Sequence  {
         TileRange toLoad = null;
         for (int tileNo = startTile; tileNo <= endTile; tileNo++) {
 
-            SequenceTile tile = findCachedTile(chr, tileNo);
+            String key = getKey(chr, tileNo);
+            SequenceTile tile = sequenceCache.get(key);
 
             if (tile == null) {
 
@@ -216,23 +211,23 @@ public class SequenceWrapper implements Sequence  {
                 tiles[tileNo - startTile] = tile;
 
                 if (toLoad != null) {
-                    loadTiles(chr, startTile, tiles, toLoad.startTile, toLoad.endTile);
+                    loadTiles(chr, startTile, tiles, toLoad);
                     toLoad = null;
                 }
             }
         }
 
         if (toLoad != null) {
-            loadTiles(chr, startTile, tiles, toLoad.startTile, toLoad.endTile);
+            loadTiles(chr, startTile, tiles, toLoad);
         }
 
         return tiles;
 
     }
 
-    private SequenceTile loadTiles(String chr, int startTile, SequenceTile[] tiles, int firstTile, int lastTile) {
-        int start = firstTile * cacheTileSize;
-        int end = (lastTile + 1) * cacheTileSize;
+    private void loadTiles(String chr, int startTile, SequenceTile[] tiles, TileRange toLoad) {
+        int start = toLoad.startTile * tileSize;
+        int end = (toLoad.endTile + 1) * tileSize;
         byte[] seq = sequence.getSequence(chr, start, end);
 
         if(seq == null) {
@@ -240,25 +235,23 @@ public class SequenceWrapper implements Sequence  {
             seq = new byte[end-start];
         }
 
-        SequenceTile first = null;
         int offset = 0;
-        for (int t = firstTile; t <= lastTile; t++) {
+        for (int t = toLoad.startTile; t <= toLoad.endTile; t++) {
 
-            int nBytes = Math.min(cacheTileSize, seq.length - offset);
+            int nBytes = Math.min(tileSize, seq.length - offset);
             byte[] tileSeq = new byte[nBytes];
-            int tileStart = t * cacheTileSize;
+            int tileStart = t * tileSize;
             System.arraycopy(seq, offset, tileSeq, 0, nBytes);
             SequenceTile t2 = new SequenceTile(tileStart, tileSeq);
-            sequenceCache.put(new TileKey(chr, t), t2);
-            if (tiles != null) tiles[t - startTile] = t2;
-            if (t == firstTile) first = t2;
-            offset += cacheTileSize;
+            String k = getKey(chr, t);
+            sequenceCache.put(k, t2);
+            tiles[t - startTile] = t2;
+            offset += tileSize;
         }
-        return first;
     }
 
 
-    synchronized void setTileSize(int aChunkSize) {
+    void setTileSize(int aChunkSize) {
         if(aChunkSize != tileSize) {
             tileSize = aChunkSize;
             if (cacheSequences) clearCache();
@@ -275,39 +268,18 @@ public class SequenceWrapper implements Sequence  {
         }
     }
 
-    private SequenceTile findCachedTile(String chr, int tileNo) {
-        lookupKey.chr = String.valueOf(chr);
-        lookupKey.tileNo = tileNo;
-        return sequenceCache.get(lookupKey);
-    }
-
-    private void ensureTileSize() {
-        int currentTileSize = tileSize;
-        if (cacheTileSize != currentTileSize) {
-            sequenceCache.clear();
-            cacheTileSize = currentTileSize;
-        }
-    }
-
-    private static final class TileKey {
-        private String chr;
-        private int tileNo;
-
-        private TileKey(String chr, int tileNo) {
-            // Match the old concatenation's treatment of null chromosome names.
-            this.chr = String.valueOf(chr);
-            this.tileNo = tileNo;
-        }
-
-        @Override
-        public int hashCode() {
-            return 31 * chr.hashCode() + tileNo;
-        }
-
-        @Override
-        public boolean equals(Object other) {
-            return other instanceof TileKey key && tileNo == key.tileNo && chr.equals(key.chr);
-        }
+    /**
+     * Generate unique key to be used to store/retrieve
+     * tiles. We combined the chr and tileNo, with a
+     * delimiter in between to ensure that
+     * chr1 12 doesn't clash with chr11 2
+     *
+     * @param chr
+     * @param tileNo
+     * @return
+     */
+    static String getKey(String chr, int tileNo) {
+        return chr + "/" + tileNo;
     }
 
     /**
@@ -319,7 +291,7 @@ public class SequenceWrapper implements Sequence  {
         cacheSequences = aCacheSequences;
     }
 
-    public synchronized void clearCache() {
+    public void clearCache() {
         sequenceCache.clear();
     }
 
