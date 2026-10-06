@@ -108,12 +108,23 @@ jobs:
             --tests 'org.broad.igv.ui.action.SearchCommand*Test' \
             createMacAppWithJavaDistZip
 
-      - name: Verify packaged app and prepare downloads
+      - name: Seal and verify packaged app and prepare downloads
         run: |
           zip="build/macos-ci/distributions/IGV_MacApp_${VERSION}_WithJava.zip"
           unzip -tq "$zip"
+          ditto -x -k "$zip" build/macos-ci/staging
+          app="build/macos-ci/staging/IGV_${VERSION}.app"
+          # The template launcher has a standalone ad-hoc signature, not a
+          # resource seal for this assembled bundle. Sign the completed app
+          # without replacing the bundled runtime's existing signatures.
+          codesign --force --sign - --timestamp=none "$app"
+          mkdir -p build/macos-ci/downloads
+          zip="build/macos-ci/downloads/$ARTIFACT.zip"
+          ditto -c -k --keepParent "$app" "$zip"
+          unzip -tq "$zip"
           ditto -x -k "$zip" build/macos-ci/extracted
           app="build/macos-ci/extracted/IGV_${VERSION}.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
           plutil -lint "$app/Contents/Info.plist"
           test -x "$app/Contents/MacOS/IGV"
           lipo "$app/Contents/MacOS/IGV" -verify_arch arm64
@@ -125,13 +136,11 @@ jobs:
             --module=org.igv/org.broad.igv.ui.Main --version)
           printf '%s\n' "$reported"
           [[ "$reported" == *"$VERSION"* ]]
-          mkdir -p build/macos-ci/downloads
-          cp "$zip" "build/macos-ci/downloads/$ARTIFACT.zip"
           (
             cd build/macos-ci/downloads
             shasum -a 256 "$ARTIFACT.zip" > "$ARTIFACT.zip.sha256"
           )
-          printf '\nDownload **%s** under Artifacts on this run. Unzip the artifact, then the app ZIP inside it.\n\nUnsigned, unofficial build; Apple Silicon only; Java 21 included.\n' \
+          printf '\nDownload **%s** under Artifacts on this run. Unzip the artifact, then the app ZIP inside it.\n\nAd-hoc signed, not notarized; unofficial build; Apple Silicon only; Java 21 included.\n' \
             "$ARTIFACT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload macOS app
@@ -180,7 +189,7 @@ jobs:
 
           Download the app ZIP, unzip it, and drag the .app into Applications. Intel Macs are not supported.
 
-          This app is not Developer ID signed or notarized. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway only if you trust this build. Do not disable Gatekeeper globally.
+          This app is ad-hoc signed for bundle integrity, but is not Developer ID signed or notarized. If macOS blocks it, use System Settings → Privacy & Security → Open Anyway only if you trust this build. Do not disable Gatekeeper globally.
 
           A SHA-256 checksum is included. Packaging checks and focused offline regression tests passed; GUI behavior requires manual verification."
           gh release create "$TAG" downloads/* --verify-tag \
