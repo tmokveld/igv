@@ -79,6 +79,10 @@ abstract public class BaseAlignmentCounts implements AlignmentCounts {
 
     }
 
+    static boolean hasKnownSnps() {
+        return knownSnps != null;
+    }
+
     /**
      * Get the set of base characters that are observed in this pileup.  This might characters other than 'a', 'c',
      * 'g', 't', and 'n', such as ambiguity codes or '='.

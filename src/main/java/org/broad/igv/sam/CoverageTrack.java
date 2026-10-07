@@ -34,6 +34,7 @@ import org.broad.igv.data.CoverageDataSource;
 import org.broad.igv.feature.FeatureUtils;
 import org.broad.igv.feature.LocusScore;
 import org.broad.igv.feature.genome.Genome;
+import org.broad.igv.feature.genome.GenomeManager;
 import org.broad.igv.logging.LogManager;
 import org.broad.igv.logging.Logger;
 import org.broad.igv.prefs.IGVPreferences;
@@ -62,6 +63,9 @@ import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
 import java.io.File;
+import java.awt.geom.AffineTransform;
+import java.awt.image.BufferedImage;
+import java.lang.ref.WeakReference;
 import java.text.DecimalFormat;
 import java.util.*;
 import java.util.List;
@@ -96,6 +100,9 @@ public class CoverageTrack extends AbstractTrack implements ScalableTrack {
     IGV igv;
 
     ColorScale baseModificationColorScale;
+    private static final long MAX_RASTER_BYTES = 8L * 1024 * 1024;
+    private volatile CoverageRaster coverageRaster;
+
 
 
     /**
@@ -159,11 +166,13 @@ public class CoverageTrack extends AbstractTrack implements ScalableTrack {
     }
 
     public void setDataManager(AlignmentDataManager dataManager) {
+        coverageRaster = null;
         this.dataManager = dataManager;
         this.dataManager.subscribe(this);
     }
 
     public void setDataSource(CoverageDataSource dataSource) {
+        coverageRaster = null;
         this.dataSource = dataSource;
         dataSourceRenderer = new BarChartRenderer();
         setDataRange(new DataRange(0, 0, 1.5f * (float) dataSource.getDataMax()));
@@ -205,6 +214,7 @@ public class CoverageTrack extends AbstractTrack implements ScalableTrack {
 
     @Override
     public void unload() {
+        coverageRaster = null;
         super.unload();
         removed = true;
         if (dataManager != null) {
@@ -255,10 +265,13 @@ public class CoverageTrack extends AbstractTrack implements ScalableTrack {
                 interval = dataManager.getLoadedInterval(context.getReferenceFrame(), true);
             }
             if (interval != null) {
-                intervalRenderer.paint(context, rect, interval.getCounts());
+                if (!paintCachedData(context, rect, interval)) {
+                    intervalRenderer.paint(context, rect, interval.getCounts());
+                }
                 return;
             }
         }
+        coverageRaster = null;
 
         //Not rendered yet.  Use precomputed scores, if available
         List<LocusScore> scores = getInViewScores(context.getReferenceFrame());
@@ -439,6 +452,168 @@ public class CoverageTrack extends AbstractTrack implements ScalableTrack {
             newRange.setType(getDataRange().getType());
             super.setDataRange(newRange);
 
+        }
+    }
+
+    /**
+     * Retain only ordinary opaque coverage data, never text, borders or export
+     * graphics. Published intervals have finalized counts; replacing an interval
+     * or changing any paint input rebuilds this single bounded snapshot.
+     */
+    private boolean paintCachedData(RenderContext context, Rectangle rect, AlignmentInterval interval) {
+        Graphics2D graphics = context.getGraphics();
+        Rectangle viewport = context.getVisibleRect();
+        if (dataSource != null || context.multiframe || context.expandedInsertionPosition >= 0 ||
+                context.translateX != 0 || FrameManager.getFrames().size() != 1 ||
+                alignmentTrack.getRenderOptions().getColorOption() != AlignmentTrack.ColorOption.NONE ||
+                !graphics.getClass().getName().equals("sun.java2d.SunGraphics2D") ||
+                !(graphics.getComposite() instanceof AlphaComposite composite) ||
+                composite.getRule() != AlphaComposite.SRC_OVER || composite.getAlpha() != 1 ||
+                graphics.getRenderingHint(RenderingHints.KEY_ANTIALIASING) == RenderingHints.VALUE_ANTIALIAS_ON ||
+                viewport == null || viewport.x != rect.x || viewport.width != rect.width ||
+                rect.width <= 0 || rect.height <= 0) {
+            coverageRaster = null;
+            return false;
+        }
+
+        AffineTransform transform = graphics.getTransform();
+        double deviceScale = transform.getScaleX();
+        Rectangle clip = graphics.getClipBounds();
+        if ((deviceScale != 1 && deviceScale != 2) || transform.getScaleY() != deviceScale ||
+                transform.getShearX() != 0 || transform.getShearY() != 0 ||
+                transform.getTranslateX() != Math.rint(transform.getTranslateX()) ||
+                transform.getTranslateY() != Math.rint(transform.getTranslateY()) ||
+                clip == null || clip.x < rect.x || (long) clip.x + clip.width > (long) rect.x + rect.width) {
+            coverageRaster = null;
+            return false;
+        }
+
+        // Data fills stop before the bottom border. Keep border/scale painting
+        // live in render(), even when damage is only on Y=rect.y+rect.height.
+        if (!graphics.hitClip(rect.x, rect.y, rect.width, rect.height)) {
+            return true;
+        }
+
+        Color color = getColor();
+        int device = (int) deviceScale;
+        if (color.getClass() != Color.class || color.getAlpha() != 255 || BaseAlignmentCounts.hasKnownSnps() ||
+                (long) rect.width * rect.height > MAX_RASTER_BYTES / (4L * device * device)) {
+            coverageRaster = null;
+            return false;
+        }
+
+        AlignmentCounts counts = interval.getCounts();
+        DataRange range = getDataRange();
+        boolean qualityWeight = PreferencesManager.getPreferences().getAsBoolean(SAM_ALLELE_USE_QUALITY);
+        Genome currentGenome = GenomeManager.getInstance().getCurrentGenome();
+        CoverageRaster raster = coverageRaster;
+        if (raster == null || !raster.matches(context, rect, interval, counts, genome, currentGenome,
+                range, color.getRGB(), snpThreshold, qualityWeight, device, nucleotides)) {
+            if (!Double.isFinite(context.getOrigin()) || !Double.isFinite(context.getEndLocation()) ||
+                    !Double.isFinite(context.getScale()) || context.getScale() <= 0) {
+                coverageRaster = null;
+                return false;
+            }
+            for (char nucleotide : nucleotides) {
+                Color baseColor = SequenceRenderer.nucleotideColors.get(nucleotide);
+                if (baseColor == null || baseColor.getClass() != Color.class || baseColor.getAlpha() != 255) {
+                    coverageRaster = null;
+                    return false;
+                }
+            }
+            BufferedImage image = new BufferedImage(rect.width * device, rect.height * device,
+                    BufferedImage.TYPE_INT_ARGB);
+            Graphics2D rasterGraphics = image.createGraphics();
+            try {
+                rasterGraphics.setRenderingHints(graphics.getRenderingHints());
+                rasterGraphics.scale(device, device);
+                rasterGraphics.translate(-rect.x, -rect.y);
+                rasterGraphics.setClip(rect);
+                RenderContext rasterContext = new RenderContext(context.getPanel(), rasterGraphics,
+                        context.getReferenceFrame(), viewport);
+                try {
+                    intervalRenderer.paint(rasterContext, rect, counts);
+                } finally {
+                    rasterContext.dispose();
+                }
+            } finally {
+                rasterGraphics.dispose();
+            }
+            raster = new CoverageRaster(image, context, rect, interval, counts, genome, currentGenome,
+                    range, color.getRGB(), snpThreshold, qualityWeight, device, nucleotides);
+            coverageRaster = raster;
+        }
+        graphics.drawImage(raster.image, rect.x, rect.y, rect.width, rect.height, null);
+        return true;
+    }
+
+    private static final class CoverageRaster {
+        final BufferedImage image;
+        // A hidden track's old snapshot must not keep an evicted read interval alive.
+        final WeakReference<AlignmentInterval> interval;
+        final WeakReference<AlignmentCounts> counts;
+        final Genome genome, currentGenome;
+        final ReferenceFrame frame;
+        final String chr;
+        final double origin, end, scale;
+        final int x, width, height, color, device;
+        final float minimum, baseline, maximum, snpThreshold;
+        final boolean log, qualityWeight;
+        final char[] nucleotides;
+        final int[] baseColors;
+
+        CoverageRaster(BufferedImage image, RenderContext context, Rectangle rect, AlignmentInterval interval,
+                       AlignmentCounts counts, Genome genome, Genome currentGenome, DataRange range,
+                       int color, float snpThreshold, boolean qualityWeight, int device, char[] nucleotides) {
+            this.image = image;
+            this.interval = new WeakReference<>(interval);
+            this.counts = new WeakReference<>(counts);
+            this.genome = genome;
+            this.currentGenome = currentGenome;
+            frame = context.getReferenceFrame();
+            chr = context.getChr();
+            origin = context.getOrigin();
+            end = context.getEndLocation();
+            scale = context.getScale();
+            x = rect.x;
+            width = rect.width;
+            height = rect.height;
+            this.color = color;
+            this.device = device;
+            minimum = range.getMinimum();
+            baseline = range.getBaseline();
+            maximum = range.getMaximum();
+            log = range.isLog();
+            this.snpThreshold = snpThreshold;
+            this.qualityWeight = qualityWeight;
+            this.nucleotides = nucleotides.clone();
+            baseColors = new int[nucleotides.length];
+            for (int i = 0; i < nucleotides.length; i++) {
+                baseColors[i] = SequenceRenderer.nucleotideColors.get(nucleotides[i]).getRGB();
+            }
+        }
+
+        boolean matches(RenderContext context, Rectangle rect, AlignmentInterval interval, AlignmentCounts counts,
+                        Genome genome, Genome currentGenome, DataRange range, int color, float snpThreshold,
+                        boolean qualityWeight, int device, char[] nucleotides) {
+            if (this.interval.get() != interval || this.counts.get() != counts || this.genome != genome ||
+                    this.currentGenome != currentGenome || frame != context.getReferenceFrame() ||
+                    !chr.equals(context.getChr()) || origin != context.getOrigin() || end != context.getEndLocation() ||
+                    scale != context.getScale() || x != rect.x || width != rect.width || height != rect.height ||
+                    this.color != color || this.device != device ||
+                    minimum != range.getMinimum() || baseline != range.getBaseline() || maximum != range.getMaximum() ||
+                    log != range.isLog() || this.snpThreshold != snpThreshold || this.qualityWeight != qualityWeight ||
+                    this.nucleotides.length != nucleotides.length) {
+                return false;
+            }
+            for (int i = 0; i < nucleotides.length; i++) {
+                Color baseColor = SequenceRenderer.nucleotideColors.get(nucleotides[i]);
+                if (this.nucleotides[i] != nucleotides[i] || baseColor == null || baseColor.getClass() != Color.class ||
+                        baseColors[i] != baseColor.getRGB()) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
