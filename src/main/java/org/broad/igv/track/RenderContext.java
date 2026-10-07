@@ -31,6 +31,7 @@ package org.broad.igv.track;
 
 import org.broad.igv.prefs.PreferencesManager;
 import org.broad.igv.sam.BaseRenderer;
+import org.broad.igv.sam.ExpandedReadBody;
 import org.broad.igv.sam.InsertionMarker;
 import org.broad.igv.ui.panel.ReferenceFrame;
 
@@ -54,6 +55,7 @@ public class RenderContext {
     private JComponent panel;
     private BaseRenderer.ColorStrip baseColorStrip;
     private int[] readBodyCoverage;
+    private ExpandedReadBody expandedReadBody;
     public Rectangle visibleRect;
     public boolean multiframe = false;
     public int expandedInsertionPosition = -1;
@@ -111,6 +113,19 @@ public class RenderContext {
             readBodyCoverage = new int[width];
         }
         return readBodyCoverage;
+    }
+
+    /** Expanded rectangle scratch belongs to this paint, never to copied contexts. */
+    public ExpandedReadBody getExpandedReadBody() {
+        if (expandedReadBody == null) {
+            expandedReadBody = new ExpandedReadBody();
+        }
+        return expandedReadBody;
+    }
+
+    /** Look up pending scratch without allocating for unoptimized graphics/modes. */
+    public ExpandedReadBody getExpandedReadBodyIfPresent() {
+        return expandedReadBody;
     }
 
     public void clearGraphicsCache() {
@@ -182,6 +197,7 @@ public class RenderContext {
         graphicCache.clear();
         baseColorStrip = null;
         readBodyCoverage = null;
+        expandedReadBody = null;
     }
 
 }

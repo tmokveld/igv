@@ -713,6 +713,21 @@ public class AlignmentRenderer {
         }
     }
 
+    // Keep expanded scratch state out of the shared thin-body/base traversal.
+    private void prepareExpandedReadBody(RenderContext context, Rectangle row, int height,
+                                         Graphics2D graphics, Graphics2D outline,
+                                         AlignmentTrack.RenderOptions options) {
+        boolean eligible = track.getDisplayMode() == Track.DisplayMode.EXPANDED &&
+                outline == null && overviewBatching(context, options);
+        ExpandedReadBody body = eligible ? context.getExpandedReadBody() : context.getExpandedReadBodyIfPresent();
+        if (body != null) body.reset(eligible ? graphics : null, row, height);
+    }
+
+    private static void flushExpandedReadBody(RenderContext context) {
+        ExpandedReadBody body = context.getExpandedReadBodyIfPresent();
+        if (body != null) body.draw();
+    }
+
     /**
      * Draw a (possibly gapped) alignment
      * <p>
@@ -867,6 +882,7 @@ public class AlignmentRenderer {
             outlineGraphics = context.getGraphic2DForColor(OUTLINE_COLOR);
         }
         if (thinReadBody != null) thinReadBody.reset(gAlignment.getColor());
+        if (h > 1) prepareExpandedReadBody(context, rowRect, h, gAlignment, outlineGraphics, renderOptions);
 
 
         // Compute arrow width from total length of alignment on reference
@@ -940,8 +956,14 @@ public class AlignmentRenderer {
                 // clipped, on another block, or rounded down to zero pixels.
                 if (leftArrowWidth == 0 && rightArrowWidth == 0 && outlineGraphics == null &&
                         !textured && !drawLeftClip && !drawRightClip && blockPxEnd >= blockPxStart) {
-                    g.fillRect(blockPxStart, y, blockPxEnd - blockPxStart, h);
+                    ExpandedReadBody expandedReadBody = context.getExpandedReadBodyIfPresent();
+                    if (expandedReadBody == null || g != gAlignment || !expandedReadBody.fill(blockPxStart, blockPxEnd)) {
+                        flushExpandedReadBody(context);
+                        g.fillRect(blockPxStart, y, blockPxEnd - blockPxStart, h);
+                    }
                 } else {
+                    // Preserve traversal order when a decoration interrupts rectangles.
+                    flushExpandedReadBody(context);
                     // Keep the original geometry for arrows, outlines, textures and clipping decorations.
                     int[] xPoly = {blockPxStart - leftArrowWidth, blockPxStart, blockPxEnd,
                             blockPxEnd + rightArrowWidth, blockPxEnd, blockPxStart};
@@ -971,6 +993,7 @@ public class AlignmentRenderer {
             leftmost = false;
         }
         if (thinReadBody != null) thinReadBody.draw();
+        if (h > 1) flushExpandedReadBody(context);
 
         // Draw bases for an alignment block.  The bases are "overlaid" on the block with a transparency value (alpha)
         // that is proportional to the base quality score, or flow signal deviation, whichever is selected.
