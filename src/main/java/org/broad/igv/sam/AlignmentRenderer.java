@@ -332,7 +332,8 @@ public class AlignmentRenderer {
 
         final boolean leaveMargin = this.track.getDisplayMode() != Track.DisplayMode.SQUISHED;
         ThinReadBody thinReadBody = Math.max(1, rowRect.height - (leaveMargin ? 2 : 0)) == 1
-                ? ThinReadBody.create(context, rowRect, overviewBatching(context, renderOptions)) : null;
+                ? ThinReadBody.create(context, rowRect, overviewBatching(context, renderOptions),
+                        !leaveMargin && context.getScale() >= 100 && Double.isFinite(context.getScale())) : null;
 
         double origin = context.getOrigin();
         double locScale = context.getScale();
@@ -600,8 +601,9 @@ public class AlignmentRenderer {
     /**
      * Raster-only replacement for a normalized, square-capped one-pixel stroke.
      * Work in device pixels: a logical fillRect is not equivalent at 2x or 1.25x.
-     * The cached graphics retains the original device clip. At overview zoom,
-     * coverage counts retain repeated SRC_OVER contributions from overlapping caps.
+     * The cached graphics retains the original device clip. Finer-scale overview
+     * batching keeps its existing color strip; coarse SQUISHED bodies instead
+     * retain exact, separate SRC_OVER layers for overlapping inclusive caps.
      */
     private static final class ThinReadBody {
         private static final BasicStroke DEFAULT_STROKE = new BasicStroke();
@@ -616,9 +618,10 @@ public class AlignmentRenderer {
         private final int width;
         private final int[] coverage;
         private final BaseRenderer.ColorStrip colorStrip;
+        private final ThinReadBodyLayers layers;
 
         private ThinReadBody(Graphics2D graphics, AffineTransform transform, Rectangle row,
-                             RenderContext context, boolean batch) {
+                             RenderContext context, boolean batch, boolean exactLayers) {
             this.graphics = graphics;
             scaleX = transform.getScaleX();
             translateX = transform.getTranslateX();
@@ -637,9 +640,11 @@ public class AlignmentRenderer {
             batch = batch && width > 0;
             coverage = batch ? context.getReadBodyCoverage(width) : null;
             colorStrip = batch ? context.getBaseColorStrip() : null;
+            ThinReadBodyLayers scratch = exactLayers ? context.getThinReadBodyLayers() : null;
+            layers = scratch != null && scratch.reset(graphics, clip, top, height) ? scratch : null;
         }
 
-        private static ThinReadBody create(RenderContext context, Rectangle row, boolean batch) {
+        private static ThinReadBody create(RenderContext context, Rectangle row, boolean batch, boolean exactLayers) {
             Graphics2D source = context.getGraphics2D("ALIGNMENT");
             // Do not change SVG/vector semantics or assume a custom Graphics2D rasterizer.
             if (!source.getClass().getName().equals("sun.java2d.SunGraphics2D") ||
@@ -665,7 +670,7 @@ public class AlignmentRenderer {
             graphics.setTransform(new AffineTransform());
             graphics.setComposite(source.getComposite());
             graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
-            return new ThinReadBody(graphics, transform, row, context, batch);
+            return new ThinReadBody(graphics, transform, row, context, batch, exactLayers);
         }
 
         private static boolean supportedScale(double scale) {
@@ -677,11 +682,16 @@ public class AlignmentRenderer {
         }
 
         private void reset(Color color) {
+            if (layers != null) layers.draw();
             graphics.setColor(color);
             if (coverage != null) Arrays.fill(coverage, 0, width, 0);
         }
 
         private void draw() {
+            if (layers != null) {
+                layers.draw();
+                return;
+            }
             if (coverage == null) return;
             colorStrip.reset(graphics, startX, width);
             Color color = graphics.getColor();
@@ -702,7 +712,9 @@ public class AlignmentRenderer {
             // even when they coincide or arrive in reverse order.
             int left = (int) Math.floor(first + 0.25) + leftInset;
             int right = (int) Math.floor(last + 0.25) + 1;
-            if (coverage == null) {
+            if (layers != null) {
+                layers.fill(left, right);
+            } else if (coverage == null) {
                 graphics.fillRect(left, top, right - left, height);
             } else {
                 int firstColumn = Math.max(0, left - startX);

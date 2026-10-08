@@ -289,6 +289,68 @@ public class AlignmentRendererReadBodyTest {
     }
 
     @Test
+    public void coarseOnePixelUnsupportedStatesAndEndpointFlushesKeepLegacyPixels() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        track.setColor(new Color(82, 113, 141, 167));
+        SAMAlignment read = new SAMAlignment(record("14000M", false)) {
+            @Override
+            public AlignmentBlock[] getAlignmentBlocks() {
+                return new AlignmentBlock[]{
+                        new AlignmentBlockImpl(10000, new byte[0], null, 0, 1600, 'M'),
+                        new AlignmentBlockImpl(10800, new byte[0], null, 0, 1700, 'M'),
+                        new AlignmentBlockImpl(10000, new byte[0], null, 0, 1600, 'M'),
+                        new AlignmentBlockImpl(14400, new byte[0], null, 0, -500, 'M'),
+                        new AlignmentBlockImpl(18000, new byte[0], null, 0, 0, 'M')};
+            }
+        };
+        List<Consumer<Graphics2D>> configurations = List.of(
+                g -> g.scale(1.5, 1.5), g -> g.translate(0.125, 0.125),
+                g -> { g.translate(5, 1); g.rotate(0.12); },
+                g -> g.shear(0.2, 0.1),
+                g -> { g.translate(100, 10); g.scale(-1, -1); },
+                g -> g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON),
+                g -> g.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE),
+                g -> g.setStroke(new BasicStroke(2)),
+                g -> g.setStroke(new BasicStroke(1, BasicStroke.CAP_BUTT, BasicStroke.JOIN_MITER)),
+                g -> g.setStroke(new BasicStroke(1, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)),
+                g -> g.setStroke(new BasicStroke(1, BasicStroke.CAP_SQUARE, BasicStroke.JOIN_MITER,
+                        10, new float[]{2, 3}, 0)),
+                g -> g.setClip(null),
+                g -> g.setClip(new Rectangle(-2000000, -2000000, 4000000, 4000000)),
+                g -> g.translate(2000000, 0));
+        for (Track.DisplayMode mode : List.of(Track.DisplayMode.SQUISHED, Track.DisplayMode.EXPANDED)) {
+            track.setDisplayMode(mode);
+            for (double bpp : new double[]{100, 143.5791667}) {
+                for (Consumer<Graphics2D> configuration : configurations) {
+                    assertThinLegacy(List.of(read, read), 9990.25, 9990.25 + 100 * bpp, g -> {
+                        g.setClip(new Rectangle(0, 0, 200, 48));
+                        configuration.accept(g);
+                    });
+                }
+            }
+        }
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        SAMAlignment unsupportedEndpoints = new SAMAlignment(record("14000M", false)) {
+            @Override
+            public AlignmentBlock[] getAlignmentBlocks() {
+                return new AlignmentBlock[]{
+                        new AlignmentBlockImpl(10000, new byte[0], null, 0, 1600, 'M'),
+                        new AlignmentBlockImpl(-300000000, new byte[0], null, 0, 300011600, 'M'),
+                        new AlignmentBlockImpl(11000, new byte[0], null, 0, 1800, 'M'),
+                        new AlignmentBlockImpl(13000, new byte[0], null, 0, 300000000, 'M'),
+                        new AlignmentBlockImpl(12000, new byte[0], null, 0, 700, 'M')};
+            }
+        };
+        for (double scale : new double[]{1, 1.25, 2}) {
+            assertThinLegacy(List.of(unsupportedEndpoints, read), 9990.25, 19990.25, g -> {
+                g.setClip(new Rectangle(0, 0, 200, 48));
+                g.translate(0.25, 0.75);
+                g.scale(scale, scale);
+            });
+        }
+    }
+
+    @Test
     public void onePixelSvgMatchesLegacyLineCoverageAndAlpha() {
         track.setDisplayMode(Track.DisplayMode.SQUISHED);
         SAMAlignment alignment = new SAMAlignment(record("1M2D40M", false));
@@ -319,6 +381,44 @@ public class AlignmentRendererReadBodyTest {
             } finally {
                 actual.dispose();
                 expected.dispose();
+            }
+        }
+    }
+
+    @Test
+    public void coarseOnePixelSvgKeepsOrderedVectorStrokes() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        track.setColor(new Color(82, 113, 141, 167));
+        SAMAlignment alignment = new SAMAlignment(record("400M2D400M", false));
+        for (double bpp : new double[]{100, 143.5791667}) {
+            ReferenceFrame frame = frame(9980.25, 9980.25 + 100 * bpp, 100);
+            for (double scale : new double[]{1, 1.25, 2}) {
+                SVGGraphics2D actual = new SVGGraphics2D(GenericDOMImplementation.getDOMImplementation()
+                        .createDocument("http://www.w3.org/2000/svg", "svg", null));
+                SVGGraphics2D expected = new SVGGraphics2D(GenericDOMImplementation.getDOMImplementation()
+                        .createDocument("http://www.w3.org/2000/svg", "svg", null));
+                try {
+                    actual.setSVGCanvasSize(new Dimension(200, 48));
+                    expected.setSVGCanvasSize(new Dimension(200, 48));
+                    actual.scale(scale, scale);
+                    expected.scale(scale, scale);
+                    render(List.of(alignment, alignment), actual, frame, 1);
+                    legacyPolygon(expected, alignment, frame, 100, 1);
+                    legacyPolygon(expected, alignment, frame, 100, 1);
+                    Element actualRoot = actual.getRoot();
+                    Element expectedRoot = expected.getRoot();
+                    assertEquals("Thin SVG bodies remain vectors", 0,
+                            actualRoot.getElementsByTagName("image").getLength());
+                    for (double y = 0.125; y < 5; y += 0.25) {
+                        for (double x = 0.125; x < 100; x += 0.25) {
+                            assertEquals("SVG coverage at " + x + "," + y + "; bpp=" + bpp + "; scale=" + scale,
+                                    vectorPixel(expectedRoot, x, y), vectorPixel(actualRoot, x, y));
+                        }
+                    }
+                } finally {
+                    actual.dispose();
+                    expected.dispose();
+                }
             }
         }
     }

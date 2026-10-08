@@ -32,6 +32,7 @@ package org.broad.igv.track;
 import org.broad.igv.prefs.PreferencesManager;
 import org.broad.igv.sam.BaseRenderer;
 import org.broad.igv.sam.ExpandedReadBody;
+import org.broad.igv.sam.ThinReadBodyLayers;
 import org.broad.igv.sam.InsertionMarker;
 import org.broad.igv.ui.panel.ReferenceFrame;
 
@@ -56,6 +57,7 @@ public class RenderContext {
     private BaseRenderer.ColorStrip baseColorStrip;
     private int[] readBodyCoverage;
     private ExpandedReadBody expandedReadBody;
+    private ThinReadBodyLayers thinReadBodyLayers;
     public Rectangle visibleRect;
     public boolean multiframe = false;
     public int expandedInsertionPosition = -1;
@@ -128,6 +130,14 @@ public class RenderContext {
         return expandedReadBody;
     }
 
+    /** Exact thin-body device layers belong to this paint, never to copied contexts. */
+    public ThinReadBodyLayers getThinReadBodyLayers() {
+        if (thinReadBodyLayers == null) {
+            thinReadBodyLayers = new ThinReadBodyLayers();
+        }
+        return thinReadBodyLayers;
+    }
+
     public void clearGraphicsCache() {
         for(Graphics2D g: graphicCache.values()) {
             g.dispose();
@@ -198,6 +208,7 @@ public class RenderContext {
         baseColorStrip = null;
         readBodyCoverage = null;
         expandedReadBody = null;
+        thinReadBodyLayers = null;
     }
 
 }

@@ -5,7 +5,6 @@ import htsjdk.samtools.util.SequenceUtil;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
 
 public class BaseModificationKey implements Comparable {
     char base;
@@ -59,7 +58,9 @@ public class BaseModificationKey implements Comparable {
 
     @Override
     public int hashCode() {
-        return Objects.hash(base, strand, modification);
+        int result = 31 + base;
+        result = 31 * result + strand;
+        return 31 * result + (modification == null ? 0 : modification.hashCode());
     }
 
     @Override

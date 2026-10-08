@@ -49,7 +49,11 @@ public class BaseModificationCounts {
         if (alignment.getAlignmentBlocks() == null) return;
 
         List<BaseModificationSet> baseModificationSets = alignment.getBaseModificationSets();
-        if (baseModificationSets != null) {
+        if (baseModificationSets != null && !baseModificationSets.isEmpty()) {
+            int setCount = baseModificationSets.size();
+            // Resolve lazily to preserve first-observation ordering in the shared key cache.
+            BaseModificationKey[] modificationKeys = new BaseModificationKey[setCount];
+            BaseModificationKey[] noModificationKeys = new BaseModificationKey[setCount];
 
             for (AlignmentBlock block : alignment.getAlignmentBlocks()) {
 
@@ -65,24 +69,39 @@ public class BaseModificationCounts {
                     char canonicalBase = 0;
                     int maxLH = -1;
                     BaseModificationKey maxKey = null;
+                    int maxSetIdx = -1;
                     int noModLH = 255;
-                    for (BaseModificationSet bmSet : baseModificationSets) {
+                    for (int setIdx = 0; setIdx < setCount; setIdx++) {
+                        BaseModificationSet bmSet = baseModificationSets.get(setIdx);
                         int lh = bmSet.getLikelihood(readIdx);
                         if (lh >= 0) {
-                            BaseModificationKey modKey = BaseModificationKey.getKey(bmSet.getBase(), bmSet.getStrand(), bmSet.getModification());
+                            BaseModificationKey modKey = modificationKeys[setIdx];
+                            if (modKey == null) {
+                                modKey = BaseModificationKey.getKey(bmSet.getBase(), bmSet.getStrand(), bmSet.getModification());
+                                modificationKeys[setIdx] = modKey;
+                            }
                             allModifications.add(modKey);
                             noModLH -= lh;
                             if (lh > maxLH) {
                                 canonicalBase = bmSet.getCanonicalBase();   // This has to be the same for all modifications at this position
                                 maxLH = lh;
                                 maxKey = modKey;
+                                maxSetIdx = setIdx;
                             }
                         }
                     }
 
                     // Take the modification with highest likelihood, which might be the likelihood of no-modification
                     if (canonicalBase != 0) {
-                        BaseModificationKey noModKey = BaseModificationKey.getKey(canonicalBase, '+', "NONE_" + canonicalBase);
+                        BaseModificationKey noModKey = noModificationKeys[maxSetIdx];
+                        if (noModKey == null) {
+                            noModKey = BaseModificationKey.getKey(canonicalBase, '+', "NONE_" + canonicalBase);
+                            for (int setIdx = 0; setIdx < setCount; setIdx++) {
+                                if (baseModificationSets.get(setIdx).getCanonicalBase() == canonicalBase) {
+                                    noModificationKeys[setIdx] = noModKey;
+                                }
+                            }
+                        }
                         allModifications.add(noModKey);
                         pushLikelihood(position, (byte) maxLH, maxKey, maxLikelihoods);
 

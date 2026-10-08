@@ -139,6 +139,127 @@ public class AlignmentRendererExpandedBodyTest {
     }
 
     @Test
+    public void coarseSquishedCapsRetainEveryAlphaLayerOnAllRasterTargetsAndDamageShapes() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        Alignment read = blocks("coarse-caps", false,
+                block(1000, 1600), block(1800, 1700), block(1000, 1600),
+                block(2700, 0), block(4400, -500), block(6000, 12000));
+        for (double bpp : new double[]{100, 143.5791667}) {
+            for (double scale : new double[]{1, 1.25, 2}) {
+                for (double translation : new double[]{0, 0.25, 0.75, 3}) {
+                    for (int type : new int[]{BufferedImage.TYPE_INT_RGB, BufferedImage.TYPE_INT_ARGB,
+                            BufferedImage.TYPE_INT_ARGB_PRE}) {
+                        for (Color background : new Color[]{Color.WHITE, new Color(37, 61, 89),
+                                new Color(0, 0, 0, 0), BACKGROUND}) {
+                            for (Shape damage : List.of(new Rectangle(-4, 0, 114, 12),
+                                    new Rectangle(5, 1, 29, 3),
+                                    new Ellipse2D.Double(-2.25, 0.25, 109.5, 4.5))) {
+                                assertReplay(List.of(read, read, read), frame(1000.25, bpp), row(1), type,
+                                        background, g -> {
+                                            g.translate(translation, translation);
+                                            g.scale(scale, scale);
+                                            g.clip(damage);
+                                        });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        track.getSelectedReadNames().put(read.getReadName(), new Color(211, 43, 137, 173));
+        for (double scaleX : new double[]{1, 1.25, 2}) {
+            for (double scaleY : new double[]{1, 1.25, 2}) {
+                assertReplay(List.of(read, read), frame(1000.25, 143.5791667), row(1),
+                        BufferedImage.TYPE_INT_ARGB_PRE, BACKGROUND, g -> {
+                            g.translate(0.75, 0.25);
+                            g.scale(scaleX, scaleY);
+                        });
+            }
+        }
+        for (int alpha : new int[]{0, 1, 51, 113, 254, 255}) {
+            track.getSelectedReadNames().put(read.getReadName(), new Color(211, 43, 137, alpha));
+            for (int type : new int[]{BufferedImage.TYPE_INT_ARGB, BufferedImage.TYPE_INT_ARGB_PRE}) {
+                for (Color background : new Color[]{BACKGROUND, new Color(0, 0, 0, 0)}) {
+                    assertReplay(List.of(read, read, read), frame(1000.25, 143.5791667), row(1), type,
+                            background, g -> g.scale(2, 2));
+                }
+            }
+        }
+    }
+
+    @Test
+    public void coarseSquishedBodiesFlushBetweenReadsGapsAndInsertionsWithoutActivatingBases() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        Alignment first = new SAMAlignment(record("gap-insertion", 1000, "400M2I600D400M", false));
+        Alignment second = blocks("selected-overlap", true,
+                block(1000, 900), block(1100, 700), block(1000, 900));
+        track.getSelectedReadNames().put(second.getReadName(), new Color(43, 179, 71, 113));
+        track.getRenderOptions().setShowMismatches(true);
+        track.getRenderOptions().setShowAllBases(true);
+        for (double bpp : new double[]{100, 100.0001, 143.5791667}) {
+            for (double scale : new double[]{1, 1.25, 2}) {
+                for (int type : new int[]{BufferedImage.TYPE_INT_ARGB, BufferedImage.TYPE_INT_ARGB_PRE}) {
+                    assertReplay(List.of(first, second, first), frame(985.25, bpp), row(1), type,
+                            BACKGROUND, g -> {
+                                g.translate(0.25, 0.75);
+                                g.scale(scale, scale);
+                            });
+                }
+            }
+        }
+        Composite customComposite = (source, destination, hints) ->
+                AlphaComposite.getInstance(AlphaComposite.SRC_OVER, 0.37f)
+                        .createContext(source, destination, hints);
+        for (Composite composite : List.of(AlphaComposite.Src, customComposite)) {
+            // Body graphics still install their own 0.75 SRC_OVER composite;
+            // surrounding gap/insertion paints keep the source's composite.
+            assertReplay(List.of(first, second, first), frame(985.25, 143.5791667), row(1),
+                    BufferedImage.TYPE_INT_ARGB_PRE, BACKGROUND, g -> {
+                        g.scale(2, 2);
+                        g.setComposite(composite);
+                    });
+        }
+        Alignment threshold = blocks("base-threshold", false,
+                mismatchBlock(1000, 160, 4), block(1120, 200), block(1350, 20));
+        for (double bpp : new double[]{99.9999, 100, 100.0001}) {
+            // Below the guard use the ordinary per-base rasterizer, not the
+            // existing finer-scale strip's intentionally different alpha rounding.
+            assertReplay(List.of(threshold), frame(985.25, bpp), row(1), BufferedImage.TYPE_INT_ARGB_PRE,
+                    BACKGROUND, g -> g.translate(bpp < 100 ? 0.125 : 0.25, 0.25));
+        }
+    }
+
+    @Test
+    public void coarseSquishedSuccessiveCopiedAndEmptyPaintsKeepIndependentPixels() {
+        track.setDisplayMode(Track.DisplayMode.SQUISHED);
+        Alignment read = blocks("coarse-reset", false, block(1000, 900), block(1100, 700), block(1000, 900));
+        ReferenceFrame frame = frame(985.25, 143.5791667);
+        try (Raster actual = new Raster(frame, BufferedImage.TYPE_INT_ARGB_PRE, BACKGROUND, g -> g.scale(2, 2));
+             Raster expected = new Raster(frame, BufferedImage.TYPE_INT_ARGB_PRE, BACKGROUND, g -> g.scale(2, 2))) {
+            for (Rectangle row : List.of(row(1), new Rectangle(0, 8, 13, 1), new Rectangle(0, 14, 100, 1))) {
+                render(List.of(read, read), actual.context, row);
+                replay(List.of(read, read), expected.graphics, frame, row);
+            }
+            RenderContext child = new RenderContext(actual.context);
+            try {
+                Rectangle childRow = new Rectangle(0, 20, 100, 1);
+                render(List.of(read), child, childRow);
+                replay(List.of(read), expected.graphics, frame, childRow);
+            } finally {
+                child.dispose();
+                child.getGraphics().dispose();
+            }
+            Rectangle parentRow = new Rectangle(0, 26, 100, 1);
+            render(List.of(read), actual.context, parentRow);
+            replay(List.of(read), expected.graphics, frame, parentRow);
+            actual.context.clearGraphicsCache();
+            actual.graphics.setClip(new Rectangle(0, 0, 0, 0));
+            render(List.of(read), actual.context, row(1));
+            ExpandedReadBodyTest.assertExactPixels(expected.image, actual.image);
+        }
+    }
+
+    @Test
     public void partialAndCurvedDamageIntegerTranslationsAndRowDeviceEdgesAreExact() {
         Alignment read = blocks("damage", false, block(985, 40), block(1000, 40), block(1020, 24),
                 block(1001, 8), block(1260, 80));

@@ -300,14 +300,15 @@ public class DenseAlignmentCounts extends BaseAlignmentCounts {
                 negCounts.put(b, new int[nPts]);
                 qualities.put(b, new int[nPts]);
             }
+            int[] strandCounts = isNegativeStrand ? negCounts.get(b) : posCounts.get(b);
+            int[] baseQualities = qualities.get(b);
+            strandCounts[offset]++;
             if (isNegativeStrand) {
-                negCounts.get(b)[offset] = negCounts.get(b)[offset] + 1;
                 negTotal[offset] = negTotal[offset] + 1;
             } else {
-                posCounts.get(b)[offset] = posCounts.get(b)[offset] + 1;
                 posTotal[offset] = posTotal[offset] + 1;
             }
-            qualities.get(b)[offset] = qualities.get(b)[offset] + q;
+            baseQualities[offset] += q;
 
             totalQ[offset] = totalQ[offset] + q;
 

@@ -25,11 +25,16 @@
 
 package org.broad.igv.sam;
 
+import htsjdk.samtools.SAMFileHeader;
+import htsjdk.samtools.SAMRecord;
+import htsjdk.samtools.SAMSequenceRecord;
+
 import org.broad.igv.AbstractHeadlessTest;
 import org.broad.igv.sam.reader.AlignmentReader;
 import org.broad.igv.sam.reader.AlignmentReaderFactory;
 import org.broad.igv.util.TestUtils;
 import org.junit.Test;
+import java.util.Arrays;
 import java.util.Iterator;
 import static org.junit.Assert.*;
 
@@ -39,26 +44,67 @@ import static org.junit.Assert.*;
  */
 public class DenseAlignmentCountsTest extends AbstractHeadlessTest {
 
-    /**
-     * Test for IGV-2047, make sure we guard against the boundaries properly
-     * @throws Exception
-     */
     @Test
-    public void testGetMaxCount_smallInterval() throws Exception {
-        int fullIntervals = 0;
-        int extraLength = DenseAlignmentCounts.MAX_COUNT_INTERVAL / 4 + 2;
-        tstGetMaxCount(0, fullIntervals, extraLength);
+    public void countsBothStrandsQualitiesAndDynamicBasesWithinSmallInterval() {
+        DenseAlignmentCounts counts = new DenseAlignmentCounts(100, 104, null);
+        counts.incCounts(alignment(99, "nAr=tN", new byte[]{10, 20, 30, 40, 50, 60}, false));
+        counts.incCounts(alignment(100, "aR=t", new byte[]{7, 8, 9, 10}, true));
+        counts.incCounts(alignment(101, "r", new byte[]{11}, false));
+
+        byte[] bases = {'a', 'r', '=', 't'};
+        int[] totals = {2, 3, 2, 2};
+        int[] positiveCounts = {1, 2, 1, 1};
+        int[] qualitySums = {27, 49, 49, 60};
+        for (int i = 0; i < bases.length; i++) {
+            int position = 100 + i;
+            assertEquals(totals[i], counts.getTotalCount(position));
+            assertEquals(totals[i], counts.getCount(position, bases[i]));
+            assertEquals(positiveCounts[i], counts.getPosCount(position, bases[i]));
+            assertEquals(1, counts.getNegCount(position, bases[i]));
+            assertEquals(positiveCounts[i], counts.getTotalPositiveCount(position));
+            assertEquals(1, counts.getTotalNegativeCount(position));
+            assertEquals(qualitySums[i], counts.getQuality(position, bases[i]));
+            assertEquals(qualitySums[i], counts.getTotalQuality(position));
+        }
+        assertTrue(counts.getBases().contains((byte) 'R'));
+        assertTrue(counts.getBases().contains((byte) '='));
+        assertFalse(counts.getBases().contains((byte) 'r'));
+        assertEquals(0, counts.getTotalCount(99));
+        assertEquals(0, counts.getTotalCount(104));
+        assertEquals(0, counts.getCount(99, (byte) 'n'));
+        assertEquals(0, counts.getCount(104, (byte) 'N'));
+        assertEquals(0, counts.getTotalQuality(99));
+        assertEquals(0, counts.getTotalQuality(104));
+        assertEquals(3, counts.getMaxCount(100, 104));
+        assertEquals(3, counts.getMaxCount(0, 200));
     }
 
-    /**
-     * More normal case of largish interval
-     * @throws Exception
-     */
     @Test
-    public void testGetMaxCount_LargeInterval() throws Exception {
-        int fullIntervals = 10;
-        int extraLength = DenseAlignmentCounts.MAX_COUNT_INTERVAL / 4 + 2;
-        tstGetMaxCount(0, fullIntervals, extraLength);
+    public void maxCoverageIncludesLastBaseOfLargeIntervalWithoutCountingOutsideBases() {
+        int start = 1000;
+        int end = 2027;
+        DenseAlignmentCounts counts = new DenseAlignmentCounts(start, end, null);
+        String spanningBases = "A".repeat(end - start + 2);
+        byte[] qualities = new byte[spanningBases.length()];
+        Arrays.fill(qualities, (byte) 25);
+        counts.incCounts(alignment(start - 1, spanningBases, qualities, false));
+        counts.incCounts(alignment(start - 1, spanningBases, qualities, true));
+        counts.incCounts(alignment(end - 1, "a", new byte[]{30}, false));
+
+        assertEquals(2, counts.getTotalCount(start));
+        assertEquals(2, counts.getTotalCount(end - 2));
+        assertEquals(3, counts.getTotalCount(end - 1));
+        assertEquals(2, counts.getPosCount(end - 1, (byte) 'A'));
+        assertEquals(1, counts.getNegCount(end - 1, (byte) 'a'));
+        assertEquals(80, counts.getQuality(end - 1, (byte) 'a'));
+        assertEquals(80, counts.getTotalQuality(end - 1));
+        assertEquals(0, counts.getTotalCount(start - 1));
+        assertEquals(0, counts.getTotalCount(end));
+        assertEquals(0, counts.getTotalQuality(start - 1));
+        assertEquals(0, counts.getTotalQuality(end));
+        assertEquals(3, counts.getMaxCount(start, end));
+        assertEquals(3, counts.getMaxCount(start - 100, end + 100));
+        assertEquals(3, counts.getMaxCount(end - 1, end));
     }
 
     @Test
@@ -80,18 +126,17 @@ public class DenseAlignmentCountsTest extends AbstractHeadlessTest {
 
     }
 
-    private void tstGetMaxCount(int start, int fullIntervals, int extraLength) {
-        int mci = DenseAlignmentCounts.MAX_COUNT_INTERVAL;
-        int end = start + fullIntervals * mci + extraLength;
-        DenseAlignmentCounts daCounts = new DenseAlignmentCounts(start, end, null);
-
-        int[] queryStarts = {start, start + 50, start + mci, start + mci + 50, start, start, start, start + 10};
-        int[] queryLengths = {50, 50, 50, 50, (int) (mci * 1.5), 2 * mci, (int) (2.5 * mci), end - start + 10};
-        for (int ii = 0; ii < queryStarts.length; ii++) {
-            int queryStart = queryStarts[ii];
-            int queryEnd = queryStart + queryLengths[ii];
-            daCounts.getMaxCount(start, queryEnd);
-        }
-
+    private Alignment alignment(int start, String bases, byte[] qualities, boolean negativeStrand) {
+        SAMFileHeader header = new SAMFileHeader();
+        header.addSequence(new SAMSequenceRecord("chr1", 10000));
+        SAMRecord record = new SAMRecord(header);
+        record.setReadName("coverage");
+        record.setReferenceName("chr1");
+        record.setAlignmentStart(start + 1);
+        record.setCigarString(bases.length() + "M");
+        record.setReadString(bases);
+        record.setBaseQualities(qualities);
+        record.setReadNegativeStrandFlag(negativeStrand);
+        return new SAMAlignment(record);
     }
 }
